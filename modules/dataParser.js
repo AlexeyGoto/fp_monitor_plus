@@ -1,0 +1,1180 @@
+// Улучшенный dataParser.js с умной системой задержек
+
+function waiting(ms) {
+    return new Promise(resolve => {
+        setTimeout(() => {
+            resolve();
+        }, ms);
+    });
+}
+
+// Кулдауны keep-alive (жёсткие)
+const KEEPALIVE = {
+  sessionsMs: 5 * 60_000,   // быстрый прогон сессий — не чаще 1 раза в 5 минут
+  reviewsMs:  15 * 60_000,  // фронт-скан отзывов — не чаще 1 раза в 15 минут
+};
+
+// Конфиг отзывов
+const REVIEWS_CONFIG = {
+  retentionDays: 180,   // насколько глубоко по времени нам реально нужны отзывы
+  frontPages: 2,        // быстрый фронт-скан при открытии ПК
+  stopAfterOldPages: 2  // если подряд N страниц целиком старше cutoff — останавливаем полный проход
+};
+
+// Конфигурация парсинга для снижения нагрузки и избежания 504
+const PARSE_CONFIG = {
+    retentionDays: 90,                // Сколько дней сессий хранить и добирать
+    incrementalMaxPages: 50,          // Базовый максимум страниц за один прогон (будет динамически меняться)
+    noNewPagesStopAfter: 25,          // Останавливаемся если нет новых данных N страниц подряд (и ушли за порог давности)
+    saveEveryPages: 5,                // Как часто сохранять сессии в storage (в страницах)
+    delayJitterMin: 0.85,             // Минимальный множитель джиттера
+    delayJitterMax: 1.20,             // Максимальный множитель джиттера
+    breakerWindow: 8,                 // Окно страниц для оценки средней задержки
+    breakerThresholdMs: 4500,         // Порог средней задержки (мс) для срабатывания breaker
+    breakerCoolDownMs: 30_000,        // Пауза при срабатывании breaker
+    tailChaseMaxPages: 70             // максимум дополнительных страниц «вдогонку», когда не нашли все открытые
+}; 
+const FRONT_SCAN_PAGES = 3;            // Было в старой стратегии, сейчас не используется
+const INCREMENTAL_EXISTING_PAGES_LIMIT_DEFAULT = 5; // По умолчанию 5 страниц подряд без новых → стоп
+
+// Класс для управления умными задержками
+class SmartDelayManager {
+    constructor() {
+        this.baseDelay = 1000; // Базовая задержка 1 сек
+        this.minDelay = 500;   // Минимальная задержка 0.5 сек
+        this.maxDelay = 10000; // Максимальная задержка 10 сек
+        this.currentDelay = this.baseDelay;
+
+        // История времени ответов (последние 5 запросов)
+        this.responseHistory = [];
+        this.maxHistorySize = 5;
+
+        // Целевое время ответа (в мс)
+        this.targetResponseTime = 2000; // 2 секунды
+        this.fastResponseThreshold = 1000; // Быстрый ответ < 1 сек
+        this.slowResponseThreshold = 5000; // Медленный ответ > 5 сек
+
+        // Факторы коррекции
+        this.speedupFactor = 0.9;  // Уменьшаем задержку на 10%
+        this.slowdownFactor = 1.3; // Увеличиваем задержку на 30%
+        this.criticalSlowdownFactor = 2.0; // При критично медленном ответе
+    }
+
+    // Добавляем время ответа в историю
+    addResponseTime(responseTime) {
+        this.responseHistory.push(responseTime);
+
+        // Оставляем только последние N записей
+        if ( this.responseHistory.length > this.maxHistorySize ) {
+            this.responseHistory.shift();
+        }
+
+        this.adjustDelay(responseTime);
+    }
+
+    // Корректируем задержку на основе времени ответа
+    adjustDelay(responseTime) {
+        console.log(`Response time: ${responseTime}ms, current delay: ${this.currentDelay}ms`);
+
+        if ( responseTime < this.fastResponseThreshold ) {
+            // Быстрый ответ - можем ускориться
+            this.currentDelay = Math.max(
+                this.minDelay,
+                Math.round(this.currentDelay * this.speedupFactor)
+            );
+            console.log(`Fast response detected, reducing delay to ${this.currentDelay}ms`);
+
+        } else if ( responseTime > this.slowResponseThreshold ) {
+            // Очень медленный ответ - значительно замедляемся
+            this.currentDelay = Math.min(
+                this.maxDelay,
+                Math.round(this.currentDelay * this.criticalSlowdownFactor)
+            );
+            console.log(`Very slow response detected, increasing delay to ${this.currentDelay}ms`);
+
+        } else if ( responseTime > this.targetResponseTime ) {
+            // Медленнее целевого - немного замедляемся
+            this.currentDelay = Math.min(
+                this.maxDelay,
+                Math.round(this.currentDelay * this.slowdownFactor)
+            );
+            console.log(`Slow response detected, increasing delay to ${this.currentDelay}ms`);
+        }
+        // Если время в пределах нормы - оставляем как есть
+    }
+
+    // Получаем среднее время ответа за последние запросы
+    getAverageResponseTime() {
+        if ( this.responseHistory.length === 0 ) return 0;
+
+        const sum = this.responseHistory.reduce((a, b) => a + b, 0);
+        return Math.round(sum / this.responseHistory.length);
+    }
+
+    // Получаем текущую задержку
+    getCurrentDelay() {
+        return this.currentDelay;
+    }
+
+    // Сброс к базовым настройкам (при новой сессии парсинга)
+    reset() {
+        this.currentDelay = this.baseDelay;
+        this.responseHistory = [];
+        console.log('Delay manager reset to base delay:', this.baseDelay);
+    }
+
+    // Экстренное увеличение задержки (при ошибках типа 429)
+    emergencySlowdown() {
+        this.currentDelay = Math.min(this.maxDelay, this.currentDelay * 3);
+        console.log(`Emergency slowdown activated, delay: ${this.currentDelay}ms`);
+    }
+
+    // Получение статистики для отладки
+    getStats() {
+        return {
+            currentDelay: this.currentDelay,
+            averageResponseTime: this.getAverageResponseTime(),
+            responseHistory: [...this.responseHistory],
+            historySize: this.responseHistory.length
+        };
+    }
+}
+
+// Создаем глобальный экземпляр менеджера задержек
+const delayManager = new SmartDelayManager();
+
+
+// Функция для выполнения запроса с измерением времени
+async function fetchWithTiming(url, options = {}) {
+    const startTime = Date.now();
+
+    try {
+        const response = await fetch(url, {
+            credentials: 'include',
+            ...options
+        });
+
+        const responseTime = Date.now() - startTime;
+        delayManager.addResponseTime(responseTime);
+
+        // Специальная обработка rate limiting
+        if ( response.status === 429 ) {
+            console.log('Rate limited (429), applying emergency slowdown');
+            delayManager.emergencySlowdown();
+            throw new Error('Rate limited');
+        }
+
+        // Обработка ошибок сервера (например, 500/502/503/504)
+        if ( response.status >= 500 ) {
+            console.log(`Server error (${response.status}), applying emergency slowdown`);
+            delayManager.emergencySlowdown();
+            throw new Error(`Server error ${response.status}`);
+        }
+
+        return response;
+
+    } catch (error) {
+        const responseTime = Date.now() - startTime;
+
+        // Если запрос завершился ошибкой, но занял много времени
+        // то это тоже признак перегрузки сервера
+        if ( responseTime > delayManager.slowResponseThreshold ) {
+            delayManager.addResponseTime(responseTime);
+        } else {
+            // При быстрой ошибке (сетевая проблема) применяем умеренное замедление
+            delayManager.currentDelay = Math.min(
+                delayManager.maxDelay,
+                delayManager.currentDelay * 1.5
+            );
+        }
+
+        throw error;
+    }
+}
+
+// Универсальный fetch с ретраями и бэкоффом, возвращает HTML-строку
+async function fetchHtmlWithRetry(url, {
+  retries = 3,
+  backoffBaseMs = 2000,
+  label = 'page'
+} = {}) {
+  let attempt = 0;
+  // небольшой джиттер к базовым задержкам
+  const jitter = () => (PARSE_CONFIG.delayJitterMin + Math.random() * (PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin));
+
+  while (true) {
+    try {
+      const resp = await fetchWithTiming(url);
+      if (resp.ok) {
+        return await resp.text();
+      }
+
+      // ретраим только «временные» статусы
+      if (resp.status === 429 || resp.status >= 500) {
+        delayManager.emergencySlowdown();
+        const wait = Math.round(delayManager.getCurrentDelay() * 2 * jitter());
+        console.warn(`[retry] ${label}: HTTP ${resp.status}, wait ${wait}ms`);
+        await waiting(wait);
+      } else {
+        // 4xx ≠ 429 — считаем фатальной
+        throw new Error(`HTTP ${resp.status}`);
+      }
+    } catch (err) {
+      attempt++;
+      if (attempt > retries) {
+        console.error(`[retry] ${label}: failed after ${retries} attempts →`, err?.message || err);
+        throw err;
+      }
+      const wait = Math.round(backoffBaseMs * Math.pow(2, attempt - 1) * jitter());
+      console.warn(`[retry] ${label}: attempt ${attempt}/${retries}, wait ${wait}ms`);
+      await waiting(wait);
+    }
+  }
+}
+
+function parseDateTime(str) {
+    let [datePart, timePart = "00:00:00"] = str.split(" ");
+    const [y, m, d] = datePart.split("-").map(Number);
+    const [h, mi, s = 0] = timePart.split(":").map(Number);
+    return new Date(y, m - 1, d, h, mi, s);
+}
+
+function parseIncome(str) {
+    return parseFloat(str.replace(/[^\d.,]/g, "").replace(",", ".")) || 0;
+}
+
+// Получение примерного числа страниц без запроса в "хвост"
+async function getTotalPages() {
+    try {
+        const response = await fetchWithTiming("https://fogplay.mts.ru/merchant/?page=1");
+        const html = await response.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const pageLinks = Array.from(doc.querySelectorAll('.pagination a'))
+            .map(a => parseInt(a.textContent.trim()))
+            .filter(n => !isNaN(n));
+        if ( pageLinks.length === 0 ) return 1;
+        return Math.max(...pageLinks);
+    } catch (error) {
+        console.error('Error getting total pages (safe method):', error);
+        return 1;
+    }
+}
+
+// Быстрый поиск последней страницы (двойной шаг + бинарный поиск)
+async function findLastPageByDoubling() {
+    let low = 1;
+    let high = 2;
+    const hasNext = async (page) => {
+        const resp = await fetchWithTiming(`https://fogplay.mts.ru/merchant/?page=${page}&_=${Date.now()}`);
+        if (!resp.ok) throw new Error(`HTTP error ${resp.status}`);
+        const html = await resp.text();
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const next = doc.querySelector('.pagination li.next a');
+        return {hasNext: !!next, doc};
+    };
+
+    try {
+        // Увеличиваем high пока есть next
+        while (true) {
+            try {
+                const {hasNext: nxt} = await hasNext(high);
+                if (nxt) {
+                    low = high;
+                    high = high * 2;
+                    continue;
+                } else {
+                    break;
+                }
+            } catch (e) {
+                // Слишком высоко или 5xx — считаем это верхней границей
+                break;
+            }
+        }
+
+        // Бинарный поиск границы
+        let left = low;
+        let right = high;
+        let lastPage = left;
+        while (left <= right) {
+            const mid = Math.floor((left + right) / 2);
+            try {
+                const {hasNext: nxt} = await hasNext(mid);
+                if (nxt) {
+                    lastPage = Math.max(lastPage, mid + 1);
+                    left = mid + 1;
+                } else {
+                    lastPage = Math.max(lastPage, mid);
+                    right = mid - 1;
+                }
+            } catch (e) {
+                right = mid - 1;
+            }
+        }
+        return Math.max(1, lastPage);
+    } catch (err) {
+        console.error('findLastPageByDoubling failed:', err);
+        return 1;
+    }
+}
+
+async function authPing() {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return false;
+    const r = await fetch('https://fogplay.mts.ru/merchant/?page=1', {
+      credentials: 'include',
+      cache: 'no-store',
+      mode: 'same-origin'
+    });
+    return !!(r && r.ok);
+  } catch {
+    return false; // сюда падает TypeError: Failed to fetch
+  }
+}
+
+function isNetworkHiccup(err) {
+  const msg = String(err && err.message || err || '');
+  return msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('net::');
+}
+
+
+// ── dataParser.js ─────────────────────────────────────────────────────────────
+function ruDateToISO(s) {
+  // "DD.MM.YYYY HH:MM" -> "YYYY-MM-DD HH:MM:00"
+  const m = (s || '').match(/(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+  if (!m) return s || '';
+  const [, dd, mm, yyyy, hh='00', mi='00'] = m;
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}:00`;
+}
+
+function cleanGameName(t) {
+  // убираем управляющие символы и двойные пробелы
+  return (t || '').replace(/[\u0000-\u001F\u007F-\u009F]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function parsePage(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const rows = doc.querySelectorAll("tr[data-key]");
+  if (!rows.length) return [];
+
+  const out = [];
+  rows.forEach(row => {
+    const cells = row.querySelectorAll("td");
+    if (cells.length < 10) return;
+
+    // Новая раскладка столбцов (см. снимок страницы)
+    const pcName   = cells[0].textContent.trim();
+    const gameName = cleanGameName(cells[1].textContent);
+    const startRaw = cells[2].textContent.trim();
+    const endRaw   = cells[3].textContent.trim();
+    const duration = cells[4].textContent.trim();
+
+    // В ячейке статуса есть tooltip; забираем только текст статуса
+    const statusCell  = cells[5];
+    const statusText  = (statusCell.childNodes[0]?.textContent || statusCell.textContent || '').trim();
+
+    const income        = cells[6].textContent.trim();
+    const paymentStatus = cells[7].textContent.trim();
+    const paymentDate   = cells[8].textContent.trim();
+    const paymentId     = cells[9].textContent.trim();
+
+    // Нормализуем формат даты к ISO-подобному, чтобы new Date(...) работал стабильно
+    const startTimeISO = ruDateToISO(startRaw);
+    const endTimeISO   = endRaw === '-' ? '-' : ruDateToISO(endRaw);
+
+    // Если хочешь учитывать только завершённые — оставь условие ниже. 
+    // Если нужны все сессии — убери if.
+    // if (!statusText.startsWith('Завершена')) return;
+
+    out.push({
+      id: row.dataset.key,
+      data: {
+        pcName,
+        gameName,            // <— новое поле!
+        startTime: startTimeISO,
+        endTime: endTimeISO,
+        duration,
+        status: statusText,
+        income,
+        paymentStatus,
+        paymentDate,
+        paymentId
+      }
+    });
+  });
+
+  return out;
+}
+
+
+function calculateStatsFromSessions(sessions) {
+    const stats = {};
+
+    const sessionArray = Array.isArray(sessions) ? sessions : Object.values(sessions);
+
+    for (const session of sessionArray) {
+        const pcName = session.pcName;
+        if ( !stats[pcName] ) {
+            stats[pcName] = {
+                totalIncome: 0,
+                firstDate: null,
+                lastDate: null,
+                sessionCount: 0,
+                totalMinutes: 0,
+                daysWorked: new Set()
+            };
+        }
+
+        const income = parseFloat(session.income.replace(/[^\d.,]/g, "").replace(",", ".")) || 0;
+        const duration = parseInt(session.duration) || 0;
+        const sessionDate = new Date(session.startTime);
+
+        stats[pcName].totalIncome += income;
+        stats[pcName].totalMinutes += duration;
+        stats[pcName].sessionCount++;
+
+        if ( !stats[pcName].firstDate || sessionDate < new Date(stats[pcName].firstDate) ) {
+            stats[pcName].firstDate = sessionDate.toISOString();
+        }
+        if ( !stats[pcName].lastDate || sessionDate > new Date(stats[pcName].lastDate) ) {
+            stats[pcName].lastDate = sessionDate.toISOString();
+        }
+
+        stats[pcName].daysWorked.add(sessionDate.toISOString().split("T")[0]);
+    }
+
+    for (const pc in stats) {
+        stats[pc].daysWorked = stats[pc].daysWorked.size;
+    }
+
+    return stats;
+}
+
+// ---- helpers: open sessions + safe merge ----
+function isOpenSession(s) {
+  const st = (s?.status || '').toLowerCase();
+  return s?.endTime === '-' || /в работе|актив/i.test(st) || (!s?.endTime && !/заверш/i.test(st));
+}
+
+function indexOpenSessions(sessionsObj) {
+  const set = new Set();
+  for (const [id, s] of Object.entries(sessionsObj || {})) {
+    if (isOpenSession(s)) set.add(String(id));
+  }
+  return set;
+}
+
+function mergeSessions(existing, pageSessions) {
+  let newCount = 0, updatedCount = 0;
+  for (const { id, data } of pageSessions) {
+    const prev = existing[id];
+    if (!prev) {
+      existing[id] = data;
+      newCount++;
+    } else if (
+      prev.endTime !== data.endTime ||
+      prev.status  !== data.status  ||
+      prev.income  !== data.income  ||
+      prev.paymentStatus !== data.paymentStatus ||
+      prev.paymentDate   !== data.paymentDate
+    ) {
+      existing[id] = data;
+      updatedCount++;
+    }
+  }
+  return { newCount, updatedCount };
+}
+
+// ====== REVIEWS: парсер одной страницы ======
+function parseReviewsPage(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+
+  // пробуем несколько вариантов, чтобы не промазать по классам
+  let rows = doc.querySelectorAll('table.merchant-table__reviews tbody tr');
+  if (!rows.length) rows = doc.querySelectorAll('table.merchant-table tbody tr');
+  if (!rows.length) rows = doc.querySelectorAll('table tbody tr');
+
+  const out = [];
+  rows.forEach(tr => {
+    const tds = tr.querySelectorAll('td');
+    if (tds.length < 5) return;
+
+    // дата/начало: ищем DD.MM.YYYY HH:MM в любой ячейке
+    const rawCells = Array.from(tds).map(td => td.textContent.trim());
+    const dateCell = rawCells.find(x => /\d{2}\.\d{2}\.\d{4}/.test(x)) || '';
+    const startISO = ruDateToISO(dateCell)?.replace(' ', 'T') || null;
+
+    // рейтинг: число или по иконкам
+    let rating = parseInt((rawCells.find(x => /^\d+$/.test(x)) || ''), 10);
+    if (!rating) rating = tr.querySelectorAll('svg use[href*="star"], i.icon-star, .icon-star.fill').length || null;
+
+    // игра — берём самую длинную «словесную» ячейку
+    const game = rawCells.reduce((a, b) => (b.length > a.length ? b : a), '');
+
+    // ПК — ссылка или текст
+    const link = tr.querySelector('a[href*="computer-edit"]');
+    const pcName = link ? link.textContent.trim() : (rawCells[rawCells.length - 2] || '').trim();
+
+    const comment = rawCells[rawCells.length - 1] || '';
+
+    if (!pcName || !rating) return;
+
+    const idSeed = `${pcName}|${startISO}|${rating}|${comment}`;
+    const id = 'r_' + btoa(unescape(encodeURIComponent(idSeed))).replace(/=+$/, '');
+
+    out.push({ id, pcName, startISO, rating, game, comment });
+  });
+  return out;
+}
+
+
+// ====== REVIEWS: мердж в сторедж-структуру ======
+function mergeReviews(reviewsByPc, list) {
+  let added = 0, updated = 0;
+  for (const r of list) {
+    const bucket = (reviewsByPc[r.pcName] ||= { items: {}, lastUpdate: null });
+    const prev = bucket.items[r.id];
+    if (!prev) {
+      bucket.items[r.id] = r;
+      added++;
+    } else if (
+      prev.rating !== r.rating ||
+      prev.comment !== r.comment ||
+      prev.startISO !== r.startISO ||
+      prev.endISO !== r.endISO
+    ) {
+      bucket.items[r.id] = r;
+      updated++;
+    }
+  }
+  return { added, updated };
+}
+
+// ====== REVIEWS: бинарный поиск последней страницы (как для сессий) ======
+async function findLastReviewsPageByDoubling() {
+  let low = 1, high = 2;
+  const hasNext = async (page) => {
+    const resp = await fetchWithTiming(`https://fogplay.mts.ru/merchant/report/review/index/?page=${page}&_=${Date.now()}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const html = await resp.text();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const next = doc.querySelector('.pagination li.next a');
+    return { hasNext: !!next };
+  };
+
+  try {
+    // разгон
+    while (true) {
+      try {
+        const { hasNext: nxt } = await hasNext(high);
+        if (nxt) { low = high; high *= 2; } else break;
+      } catch { break; }
+    }
+    // бинарка
+    let left = low, right = high, last = left;
+    while (left <= right) {
+      const mid = Math.floor((left + right) / 2);
+      try {
+        const { hasNext: nxt } = await hasNext(mid);
+        if (nxt) { last = Math.max(last, mid + 1); left = mid + 1; }
+        else     { last = Math.max(last, mid);     right = mid - 1; }
+      } catch { right = mid - 1; }
+    }
+    return Math.max(1, last);
+  } catch {
+    return 1;
+  }
+}
+
+// ====== REVIEWS: быстрый фронт-скан 1..N страниц ======
+async function quickReviewFrontSweep(depthPages = REVIEWS_CONFIG.frontPages || 2) {
+  const { reviewsByPc: cache = {} } = await chrome.storage.local.get(['reviewsByPc']);
+  const reviewsByPc = { ...(cache || {}) };
+
+  let pages = 0, added = 0, updated = 0;
+  for (let page = 1; page <= depthPages; page++) {
+    const baseDelay = delayManager.getCurrentDelay();
+    const jitter = PARSE_CONFIG.delayJitterMin + Math.random() * (PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin);
+    await waiting(Math.round(baseDelay * jitter));
+
+    const resp = await fetchWithTiming(`https://fogplay.mts.ru/merchant/report/review/index/?page=${page}&_=${Date.now()}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const html = await resp.text();
+    const list = parseReviewsPage(html);
+    const r = mergeReviews(reviewsByPc, list);
+    added += r.added; updated += r.updated;
+    pages++;
+  }
+
+  if (added || updated) {
+    await chrome.storage.local.set({
+      reviewsByPc,
+      reviewsLastUpdate: new Date().toISOString()
+    });
+  }
+  console.log('[Reviews] quickReviewFrontSweep:', { pages, added, updated });
+  return { success: true, pages, added, updated };
+}
+
+// ====== REVIEWS: инкрементальный проход 1..N до первой «известной» страницы ======
+async function fetchReviewsIncrementalUntilKnown(maxPages = 50, stopAfter = 1) {
+  const { reviewsByPc: cache = {} } = await chrome.storage.local.get(['reviewsByPc']);
+  const reviewsByPc = { ...(cache || {}) };
+
+  let pages = 0, added = 0, updated = 0, knownStreak = 0;
+
+  for (let page = 1; page <= maxPages; page++) {
+    const baseDelay = delayManager.getCurrentDelay();
+    const jitter = PARSE_CONFIG.delayJitterMin + Math.random() * (PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin);
+    await waiting(Math.round(baseDelay * jitter));
+
+    const resp = await fetchWithTiming(`https://fogplay.mts.ru/merchant/report/review/index/?page=${page}&_=${Date.now()}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const html = await resp.text();
+    const list = parseReviewsPage(html);
+
+    const r = mergeReviews(reviewsByPc, list);
+    added += r.added; updated += r.updated;
+    pages++;
+
+    // «страница известна» = нет ни добавленных, ни обновлённых
+    if (r.added === 0 && r.updated === 0) {
+      knownStreak++;
+      if (knownStreak >= stopAfter) break;
+    } else {
+      knownStreak = 0;
+    }
+
+    if (list.length === 0) break; // страховка
+    if (pages % (PARSE_CONFIG.saveEveryPages || 5) === 0) {
+      await chrome.storage.local.set({ reviewsByPc, reviewsLastUpdate: new Date().toISOString() });
+    }
+  }
+
+  await chrome.storage.local.set({ reviewsByPc, reviewsLastUpdate: new Date().toISOString() });
+  console.log('[Reviews] fetchReviewsIncrementalUntilKnown:', { pages, added, updated });
+  return { success: true, pages, added, updated };
+}
+
+// ====== REVIEWS: полный проход (с отсечкой по давности) ======
+async function fetchAllReviewsFull() {
+  const cutoff = new Date(Date.now() - (REVIEWS_CONFIG.retentionDays || 180) * 24 * 3600 * 1000);
+  const { reviewsByPc: cache = {} } = await chrome.storage.local.get(['reviewsByPc']);
+  const reviewsByPc = { ...(cache || {}) };
+
+  const lastPage = await findLastReviewsPageByDoubling();
+  let pages = 0, added = 0, updated = 0, oldStreak = 0;
+
+  for (let page = 1; page <= lastPage; page++) {
+    const baseDelay = delayManager.getCurrentDelay();
+    const jitter = PARSE_CONFIG.delayJitterMin + Math.random() * (PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin);
+    await waiting(Math.round(baseDelay * jitter));
+
+    const resp = await fetchWithTiming(`https://fogplay.mts.ru/merchant/report/review/index/?page=${page}&_=${Date.now()}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const html = await resp.text();
+    const list = parseReviewsPage(html);
+
+    // проверяем давность всей страницы
+    const allOld = list.length > 0 && list.every(r => r.startISO && (new Date(r.startISO) < cutoff));
+    if (allOld) {
+      oldStreak++;
+      if (oldStreak >= (REVIEWS_CONFIG.stopAfterOldPages || 2)) break;
+    } else {
+      oldStreak = 0;
+    }
+
+    const r = mergeReviews(reviewsByPc, list);
+    added += r.added; updated += r.updated;
+    pages++;
+
+    if (pages % (PARSE_CONFIG.saveEveryPages || 5) === 0) {
+      await chrome.storage.local.set({ reviewsByPc, reviewsLastUpdate: new Date().toISOString() });
+    }
+  }
+
+  await chrome.storage.local.set({ reviewsByPc, reviewsLastUpdate: new Date().toISOString() });
+  console.log('[Reviews] fetchAllReviewsFull:', { pages, added, updated, lastPage });
+  return { success: true, pages, added, updated, lastPage };
+}
+
+
+async function parseSessions(forceFullUpdate = false) {
+  console.log('Starting parseSessions, forceFullUpdate:', forceFullUpdate);
+
+  // Сбрасываем менеджер задержек для новой сессии
+  delayManager.reset();
+
+  try {
+    if (forceFullUpdate) {
+      await chrome.storage.local.set({
+        parsingMode: 'full',
+        parsingProgress: 0,
+        lastParseTimestamp: Date.now()
+      });
+    } else {
+      await chrome.storage.local.set({
+        parsingMode: 'inc',
+        lastParseTimestamp: Date.now()
+      });
+    }
+
+    const storage = await chrome.storage.local.get(['sessions', 'lastParseTimestamp', 'incrementalPagesLimit']);
+    let existingSessions = {};
+    const incrementalLimit = storage.incrementalPagesLimit || INCREMENTAL_EXISTING_PAGES_LIMIT_DEFAULT;
+    const tailChaseMaxPages = (PARSE_CONFIG && typeof PARSE_CONFIG.tailChaseMaxPages === 'number')
+      ? PARSE_CONFIG.tailChaseMaxPages : 50;
+
+    if (!forceFullUpdate && storage.sessions) {
+      existingSessions = { ...storage.sessions };
+    }
+
+    console.log('Existing sessions count:', Object.keys(existingSessions).length);
+
+    let pagesProcessed = 0;
+    let newSessionsFound = 0;
+
+    if (!forceFullUpdate) {
+      // ── Инкрементальный проход с «дожимом» открытых ──────────────────────────
+      let currentPage = 1;
+      let consecutiveExisting = 0;
+
+      // Индекс «старых открытых» и счётчик увиденных в этом прогоне
+      const openSet = indexOpenSessions(existingSessions);
+      const foundOpenThisRun = new Set();
+      let extraChased = 0; // сколько страниц прошли сверх лимита, «вдогонку»
+
+      while (true) {
+        try {
+          const baseDelay = delayManager.getCurrentDelay();
+          const jitter = PARSE_CONFIG.delayJitterMin + Math.random() * (PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin);
+          await waiting(Math.round(baseDelay * jitter));
+
+          //const resp = await fetchWithTiming(`https://fogplay.mts.ru/merchant/?page=${currentPage}&_=${Date.now()}`);
+          //if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
+          //const html = await resp.text();
+          // при ошибке вызываем повтор на месте
+          const url = `https://fogplay.mts.ru/merchant/?page=${currentPage}&_=${Date.now()}`;
+          const html = await fetchHtmlWithRetry(url, { retries: 3, label: `sessions p=${currentPage}` });
+
+          
+          const pageSessions = parsePage(html);
+          if (pageSessions.length === 0) break; // кончились страницы
+
+          // Мерджим: считаем новые и обновлённые
+          const r = mergeSessions(existingSessions, pageSessions);
+          newSessionsFound += r.newCount;
+
+          // Отмечаем «старые открытые», которые увидели заново
+          for (const s of pageSessions) {
+            const id = String(s.id);
+            if (openSet.has(id)) foundOpenThisRun.add(id);
+          }
+
+          pagesProcessed++;
+
+          // Пустая страница = без новых и без обновлений
+          if ((r.newCount + r.updatedCount) === 0) {
+            consecutiveExisting++;
+          } else {
+            consecutiveExisting = 0;
+            if (pagesProcessed % PARSE_CONFIG.saveEveryPages === 0) {
+              await chrome.storage.local.set({ sessions: existingSessions });
+            }
+          }
+
+          const allOpenSeen = foundOpenThisRun.size >= openSet.size;
+
+          // Базовое условие останова: подряд N «пустых»
+          if (consecutiveExisting >= incrementalLimit) {
+            if (allOpenSeen) {
+              // Всё ок: все открытые «подтверждены» — выходим
+              break;
+            }
+
+            // Иначе — один раз «дожимаем» хвост (идём глубже до cap)
+            if (extraChased === 0) {
+              const lastPage = await findLastPageByDoubling().catch(() => null);
+              const cap = Math.min(
+                lastPage || (currentPage + tailChaseMaxPages),
+                currentPage + tailChaseMaxPages
+              );
+
+              while (currentPage < cap && foundOpenThisRun.size < openSet.size) {
+                currentPage++;
+                extraChased++;
+
+                const baseDelay2 = delayManager.getCurrentDelay();
+                const jitter2 = PARSE_CONFIG.delayJitterMin + Math.random() * (PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin);
+                await waiting(Math.round(baseDelay2 * jitter2));
+
+                const r2 = await fetchWithTiming(`https://fogplay.mts.ru/merchant/?page=${currentPage}&_=${Date.now()}`);
+                if (!r2.ok) break;
+
+                const html2 = await r2.text();
+                const ps2 = parsePage(html2);
+
+                const m2 = mergeSessions(existingSessions, ps2);
+                newSessionsFound += m2.newCount;
+
+                for (const s of ps2) {
+                  const id2 = String(s.id);
+                  if (openSet.has(id2)) foundOpenThisRun.add(id2);
+                }
+
+                pagesProcessed++;
+              }
+
+              // Сохраним «дожатое» и выходим из инкремента
+              await chrome.storage.local.set({ sessions: existingSessions });
+              break;
+            }
+
+            // Уже пытались «дожать» — выходим
+            break;
+          }
+
+          currentPage++;
+        } catch (e) {
+          const msg = e?.message || '';
+          const isRateLimited = msg.includes('Rate limited');
+          const isServerError = msg.includes('Server error');
+          if (isRateLimited || isServerError) {
+            const avgMs = delayManager.getAverageResponseTime();
+            const coolDown = avgMs > PARSE_CONFIG.breakerThresholdMs ? PARSE_CONFIG.breakerCoolDownMs : 15000;
+            await waiting(coolDown);
+            continue;
+          } else {
+            await waiting(5000);
+            currentPage++;
+          }
+        }
+      }
+
+    } else {
+      // ── Полный проход: находим хвост и идём назад ────────────────────────────
+      const lastPage = await findLastPageByDoubling();
+      console.log('Full update: last page detected =', lastPage);
+
+      let currentPage = Math.max(1, lastPage);
+      let done = 0;
+
+      while (currentPage >= 1) {
+        try {
+          const baseDelay = delayManager.getCurrentDelay();
+          const jitterFactor = PARSE_CONFIG.delayJitterMin + Math.random() * (PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin);
+          const smartDelay = Math.round(baseDelay * jitterFactor);
+          await waiting(smartDelay);
+
+          //const response = await fetchWithTiming(`https://fogplay.mts.ru/merchant/?page=${currentPage}&_=${Date.now()}`);
+          //if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+          //const html = await response.text();
+          
+          const url = `https://fogplay.mts.ru/merchant/?page=${currentPage}&_=${Date.now()}`;
+          const html = await fetchHtmlWithRetry(url, { retries: 3, label: `sessions p=${currentPage}` });
+          
+          const pageSessions = parsePage(html);
+
+          const r = mergeSessions(existingSessions, pageSessions);
+          newSessionsFound += r.newCount;
+
+          pagesProcessed++;
+          done = (Math.max(0, lastPage - currentPage + 1));
+          const progress = Math.min(done / Math.max(1, lastPage), 0.99);
+
+          if (pagesProcessed % PARSE_CONFIG.saveEveryPages === 0) {
+            await chrome.storage.local.set({
+              sessions: existingSessions,
+              parsingProgress: progress
+            });
+          }
+
+          currentPage--;
+        } catch (e) {
+          const isRateLimited = (e.message || '').includes('Rate limited');
+          const isServerError = (e.message || '').includes('Server error');
+          if (isRateLimited || isServerError) {
+            const avgMs = delayManager.getAverageResponseTime();
+            const coolDown = avgMs > PARSE_CONFIG.breakerThresholdMs ? PARSE_CONFIG.breakerCoolDownMs : 15000;
+            await waiting(coolDown);
+            continue;
+          } else {
+            await waiting(5000);
+            currentPage--;
+          }
+        }
+      }
+    }
+
+    // ── Финиш: сохраняем статы ─────────────────────────────────────────────────
+    console.log(`Parsing completed. New sessions found: ${newSessionsFound}`);
+    console.log(`Total sessions: ${Object.keys(existingSessions).length}`);
+    console.log(`Pages processed: ${pagesProcessed}`);
+    console.log(`Final delay manager stats:`, delayManager.getStats());
+
+    const stats = calculateStatsFromSessions(existingSessions || {});
+    const baseSave = {
+      statistics: stats,
+      sessions: existingSessions,
+      lastUpdate: new Date().toISOString(),
+      lastParseTimestamp: Date.now(),
+      parsingMode: 'idle'
+    };
+
+    if (forceFullUpdate) baseSave.parsingProgress = 1;
+
+    await chrome.storage.local.set(baseSave);
+
+    try {
+      if (forceFullUpdate) {
+        await fetchAllReviewsFull();
+      } else {
+        // идём до первой «полностью известной» страницы
+        await fetchReviewsIncrementalUntilKnown(50, 1);
+      }
+    } catch (e) {
+      console.warn('[Reviews] update after sessions error:', e?.message || e);
+    }
+
+    return {
+      success: true,
+      statistics: stats,
+      pagesProcessed,
+      newSessions: newSessionsFound,
+      totalSessions: Object.keys(existingSessions).length,
+      isIncremental: !forceFullUpdate,
+      averageResponseTime: delayManager.getAverageResponseTime(),
+      finalDelay: delayManager.getCurrentDelay()
+    };
+
+  } catch (error) {
+    console.error("Parser error:", error);
+    await chrome.storage.local.set({
+      parsingProgress: 1,
+      parsingError: error.message
+    });
+    // Отзывы: на полном обновлении — полный проход; на инкременте — лёгкая подкачка
+    try {
+      if (forceFullUpdate) {
+        await fetchAllReviewsFull();
+      } else {
+        await quickReviewFrontSweep();
+      }
+    } catch (e) {
+      console.warn('[Reviews] error:', e?.message || e);
+    }
+    return { success: false, error: error.message };
+  }
+}
+
+// Полный пересъём всех страниц сессий без очистки кэша.
+// Проходим 1..lastPage, мерджим, сохраняем каждые saveEveryPages.
+async function resyncAllSessions() {
+  console.log('[Resync] start');
+  delayManager.reset();
+
+  const { sessions: cached = {} } = await chrome.storage.local.get(['sessions']);
+  const existing = { ...(cached || {}) };
+
+  const lastPage = await findLastPageByDoubling();
+  let pagesProcessed = 0, newFound = 0, updated = 0;
+
+  for (let page = 1; page <= lastPage; page++) {
+    try {
+      const baseDelay = delayManager.getCurrentDelay();
+      const smart = Math.round(baseDelay * (PARSE_CONFIG.delayJitterMin + Math.random()*(PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin)));
+      await waiting(smart);
+
+      const url = `https://fogplay.mts.ru/merchant/?page=${page}&_=${Date.now()}`;
+      const html = await fetchHtmlWithRetry(url, { retries: 3, label: `resync p=${page}` });
+      const ps = parsePage(html);
+
+      const r = mergeSessions(existing, ps);
+      newFound += r.newCount; updated += r.updatedCount;
+      pagesProcessed++;
+
+      if (pagesProcessed % (PARSE_CONFIG.saveEveryPages || 5) === 0) {
+        const stats = calculateStatsFromSessions(existing);
+        await chrome.storage.local.set({
+          sessions: existing,
+          statistics: stats,
+          lastUpdate: new Date().toISOString()
+        });
+      }
+    } catch (e) {
+      // страницу не смогли взять даже после ретраев — логируем и идём дальше
+      console.warn('[Resync] skip page', page, e?.message || e);
+      continue;
+    }
+  }
+
+  const stats = calculateStatsFromSessions(existing);
+  await chrome.storage.local.set({
+    sessions: existing,
+    statistics: stats,
+    lastUpdate: new Date().toISOString()
+  });
+
+  console.log('[Resync] done', { lastPage, pagesProcessed, newFound, updated });
+  return { success: true, lastPage, pagesProcessed, newFound, updated };
+}
+
+
+// === quick front sweep: первые N страниц ===
+async function quickFrontSweep(depthPages = 5) {
+  const { sessions: cached = {} } = await chrome.storage.local.get(['sessions']);
+  const existing = { ...(cached || {}) };
+
+  let pagesProcessed = 0, newFound = 0, updated = 0;
+
+  for (let page = 1; page <= depthPages; page++) {
+    const baseDelay = delayManager.getCurrentDelay();
+    const jitter = PARSE_CONFIG.delayJitterMin + Math.random() * (PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin);
+    await waiting(Math.round(baseDelay * jitter));
+
+    const resp = await fetchWithTiming(`https://fogplay.mts.ru/merchant/?page=${page}&_=${Date.now()}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} on page ${page}`);
+    const html = await resp.text();
+    const ps = parsePage(html);
+
+    const r = mergeSessions(existing, ps);
+    newFound += r.newCount;
+    updated  += r.updatedCount;
+    pagesProcessed++;
+  }
+
+  if (newFound || updated) {
+    const stats = calculateStatsFromSessions(existing);
+    await chrome.storage.local.set({
+      sessions: existing,
+      statistics: stats,
+      lastUpdate: new Date().toISOString()
+    });
+  }
+
+  console.log('[KeepAlive] quickFrontSweep:', { pagesProcessed, newFound, updated });
+  return { success: true, pagesProcessed, newFound, updated };
+}
+
+// таймер keep-alive: регулярно гоняем quickFrontSweep(5) и иногда отзывы
+let __lastReviewsTick = 0;
+
+let recentWatcherTimer = null;
+function startRecentPagesWatcher(pages = 5, minMinutes = 1, maxMinutes = 3) {
+  if (recentWatcherTimer) return;
+
+  const schedule = async () => {
+    const minMs = Math.max(1, minMinutes) * 60_000;
+    const maxMs = Math.max(minMs, maxMinutes * 60_000);
+    const delay = Math.floor(minMs + Math.random() * (maxMs - minMs));
+
+    try {
+      // 0) не дёргаем, если оффлайн/неавторизованы
+      const ok = await authPing();
+      if (!ok) {
+        console.debug('[KeepAlive] skip: offline or not authorized');
+        return;
+      }
+
+      // прочитаем таймстемпы последних прогонов
+      const { keepAliveSessionsTs = 0, keepAliveReviewsTs = 0 } =
+        await chrome.storage.local.get(['keepAliveSessionsTs', 'keepAliveReviewsTs']);
+      const now = Date.now();
+
+      // 1) быстрый прогон сессий — не чаще, чем раз в KEEPALIVE.sessionsMs
+      if (now - keepAliveSessionsTs >= KEEPALIVE.sessionsMs) {
+        await quickFrontSweep(pages);
+        await chrome.storage.local.set({ keepAliveSessionsTs: Date.now() });
+      } else {
+        console.debug('[KeepAlive] sessions throttle: skip');
+      }
+
+      // 2) отзывы — не чаще, чем раз в KEEPALIVE.reviewsMs
+      if (now - keepAliveReviewsTs >= KEEPALIVE.reviewsMs) {
+        try {
+          await quickReviewFrontSweep(REVIEWS_CONFIG.frontPages || 2);
+          await chrome.storage.local.set({ keepAliveReviewsTs: Date.now() });
+        } catch (e2) {
+          if (!isNetworkHiccup(e2)) console.warn('[KeepAlive] reviews warn:', e2?.message || e2);
+        }
+      } else {
+        console.debug('[KeepAlive] reviews throttle: skip');
+      }
+
+    } catch (e) {
+      if (isNetworkHiccup(e)) {
+        console.debug('[KeepAlive] network hiccup; retry later');
+      } else {
+        console.warn('[KeepAlive] error:', e?.message || e);
+      }
+    } finally {
+      recentWatcherTimer = setTimeout(schedule, delay);
+    }
+  };
+
+  console.log('[KeepAlive] watcher started', { pages, minMinutes, maxMinutes, cooldowns: KEEPALIVE });
+  schedule();
+}
+
+
+function stopRecentPagesWatcher() {
+  if (recentWatcherTimer) {
+    clearTimeout(recentWatcherTimer);
+    recentWatcherTimer = null;
+    console.log('[KeepAlive] watcher stopped');
+  }
+}
+
+
+// Обрезка старых сессий по дате (retention)
+function pruneOldSessions(sessions, cutoffDate) {
+    const pruned = {};
+    for (const [id, s] of Object.entries(sessions)) {
+        const d = parseDateTime(s.startTime);
+        if ( d >= cutoffDate ) pruned[id] = s;
+    }
+    return pruned;
+}
+
+// Добавляем обработчик сообщений для content script
+if ( typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage ) {
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        if ( request.action === 'parseSessions' ) {
+            parseSessions(request.forceUpdate || false).then(sendResponse);
+            return true;
+        }
+    });
+}
+
+window.DataParser = {
+    waiting,
+    parseDateTime,
+    parseIncome,
+    getTotalPages,
+    parsePage,
+    calculateStatsFromSessions,
+    parseSessions,
+    delayManager,
+    // new
+    quickFrontSweep,
+    startRecentPagesWatcher,
+    stopRecentPagesWatcher,
+    indexOpenSessions,
+    parseReviewsPage,
+    quickReviewFrontSweep,
+    fetchAllReviewsFull,
+    resyncAllSessions
+};
+
+// === автозапуск keep-alive только на /merchant/*, один раз ===
+(() => {
+  try {
+    if (typeof window !== 'undefined' &&
+        !window.__fogKeepAliveStarted &&
+        /^\/merchant\//.test(location.pathname)) {
+      window.__fogKeepAliveStarted = true;
+      setTimeout(() => {
+        try { startRecentPagesWatcher(5, 1, 3); } catch (e) { console.warn(e); }
+      }, 3000); // даём странице прогрузиться
+    }
+  } catch (e) {}
+})();
