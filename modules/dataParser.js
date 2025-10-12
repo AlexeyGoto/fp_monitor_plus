@@ -556,6 +556,15 @@ async function resetHistoryAnchor() {
   await chrome.storage.local.remove([HISTORY_CONFIG.anchorKey]);
 }
 
+async function resetReviewsHistoryAnchor() {
+  await chrome.storage.local.remove(['historyReviewsAnchor']);
+}
+
+// разом оба
+async function resetHistoryAnchorsAll() {
+  await chrome.storage.local.remove(['historyAnchor', 'historyReviewsAnchor']);
+}
+
 // Один тик исторической подкачки: проходим pagesPerTick страниц по якорю
 // Оркестратор: делает тик по сессиям и/или отзывам, умеет авто-стопить
 async function historicalBackfillTick(pagesPerTick = HISTORY_CONFIG.pagesPerTick) {
@@ -1607,6 +1616,9 @@ window.DataParser = {
     _tickSessionsNoBusy,
     _tickReviewsNoBusy,
     historicalBackfillReviewsTick,
+    resetHistoryAnchor,
+    resetReviewsHistoryAnchor,
+    resetHistoryAnchorsAll,
     resyncAllSessions
 };
 

@@ -36,7 +36,7 @@
    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnOFr9BQ1q4wht80orI4mNdepWP4D9wmLrZAYiS37HXfDju+vYRlwyef3cn9fxpXNg8hKCkuzXA37z8jY6nMULAMIwmt5QCgpB2ftnFpZrmB6fNlzLaQZlIiVIzVMXV9SuKvF8tfauctDmKYZ3k4Fry5QWJdIvrxVQNq86/5qa6PCAl81gmYFfJIb6lpd42lNPJ+DUIDznEN6qsMzUoUfkGfP4B2Zl/3AjyobFtmdqyzNvzvJqsMKKteqac4o2aGyQbe+cGfyascRb061w45S5MdKZc/a0o21DdTc9gc33wb159rJzF6OcCujKpIsbWQU4tAPDjSKxfYMyQdNmDWidQIDAQAB",
    "name": "FogPlay Monitor Plus (бета)",
    "permissions": [ "storage", "unlimitedStorage", "notifications", "alarms" ],
-   "version": "0.0.12",
+   "version": "0.0.13",
    "web_accessible_resources": [ {
       "matches": [ "https://fogplay.mts.ru/*" ],
       "resources": [ "icons/*" ]

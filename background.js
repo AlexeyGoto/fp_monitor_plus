@@ -118,22 +118,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // background.js (MV3)
 
 let platformLoadCache = { ok: false, status: 0, data: null, raw: null, ts: 0 };
+const FPMP_CACHE_MS = 90 * 1000; // 1.5 мин: небольшой кэш, чтобы не долбить API
+let _platformLoadCache = { ts: 0, data: null };
+
 
 async function fetchPlatformLoad() {
-  const url = 'https://api.fogstats.ru/api/v1/load/percentage';
   try {
-    console.log('[fpmp:bg] fetch', url);
-    const t0 = Date.now();
-    const resp = await fetch(url, { cache: 'no-store' });
-    const raw = await resp.text();
-    let data = null; try { data = JSON.parse(raw); } catch {}
-    const dt = Date.now() - t0;
-    console.log('[fpmp:bg] status', resp.status, 'in', dt + 'ms', 'data:', data ?? raw);
+    // host_permissions в манифесте уже есть: https://api.fogstats.ru/*
+    const r = await fetch('https://api.fogstats.ru/api/v1/load/percentage', { cache: 'no-store' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
 
-    platformLoadCache = { ok: resp.ok, status: resp.status, data, raw, ts: Date.now() };
+    _platformLoadCache = { ts: Date.now(), data };
+    console.log('[FPMP][bg] platform load:', data);
+
+    // складываем в storage — контент-скрипт поймает onChanged и обновит UI
+    await chrome.storage.local.set({
+      platformLoad: data,
+      platformLoadTs: _platformLoadCache.ts
+    });
+
+    return { ok: true, data };
   } catch (e) {
-    console.warn('[fpmp:bg] fetch error:', e);
-    platformLoadCache = { ok: false, status: 0, data: null, raw: String(e), ts: Date.now() };
+    console.warn('[FPMP][bg] platform load error:', e);
+    return { ok: false, error: String(e) };
   }
 }
 
@@ -141,16 +149,29 @@ async function fetchPlatformLoad() {
 fetchPlatformLoad();
 setInterval(fetchPlatformLoad, 120_000);
 
-// ответы на запрос из контент-скрипта
+// Вызов из контента
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === 'fpmp:getPlatformLoad') {
-    // если кэш старше 3 минут — тихо обновим в фоне (respond не держим)
-    if (Date.now() - platformLoadCache.ts > 180_000) fetchPlatformLoad();
-    sendResponse(platformLoadCache);
-    return true; // не обязателен здесь, но не мешает
+    const force = !!msg.force;
+    const fresh = _platformLoadCache.data && (Date.now() - _platformLoadCache.ts) < FPMP_CACHE_MS;
+
+    if (!force && fresh) {
+      console.debug('[FPMP][bg] return cached platform load');
+      sendResponse({ ok: true, data: _platformLoadCache.data, cached: true });
+    } else {
+      fetchPlatformLoad().then(sendResponse);
+    }
+    return true; // async response
   }
 });
 
+// Периодически обновляем даже когда контент-скрипт молчит
+chrome.runtime.onInstalled.addListener(() => {
+  try { chrome.alarms.create('fpmpLoadTick', { periodInMinutes: 2 }); } catch {}
+});
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'fpmpLoadTick') fetchPlatformLoad();
+});
 
 // Создаем периодическое обновление
 chrome.alarms.create('updateComputers', {periodInMinutes: 1});
