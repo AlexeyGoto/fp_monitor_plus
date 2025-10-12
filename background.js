@@ -115,6 +115,43 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
+// background.js (MV3)
+
+let platformLoadCache = { ok: false, status: 0, data: null, raw: null, ts: 0 };
+
+async function fetchPlatformLoad() {
+  const url = 'https://api.fogstats.ru/api/v1/load/percentage';
+  try {
+    console.log('[fpmp:bg] fetch', url);
+    const t0 = Date.now();
+    const resp = await fetch(url, { cache: 'no-store' });
+    const raw = await resp.text();
+    let data = null; try { data = JSON.parse(raw); } catch {}
+    const dt = Date.now() - t0;
+    console.log('[fpmp:bg] status', resp.status, 'in', dt + 'ms', 'data:', data ?? raw);
+
+    platformLoadCache = { ok: resp.ok, status: resp.status, data, raw, ts: Date.now() };
+  } catch (e) {
+    console.warn('[fpmp:bg] fetch error:', e);
+    platformLoadCache = { ok: false, status: 0, data: null, raw: String(e), ts: Date.now() };
+  }
+}
+
+// стартовый прогон + периодический кэш раз в 2 минуты
+fetchPlatformLoad();
+setInterval(fetchPlatformLoad, 120_000);
+
+// ответы на запрос из контент-скрипта
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === 'fpmp:getPlatformLoad') {
+    // если кэш старше 3 минут — тихо обновим в фоне (respond не держим)
+    if (Date.now() - platformLoadCache.ts > 180_000) fetchPlatformLoad();
+    sendResponse(platformLoadCache);
+    return true; // не обязателен здесь, но не мешает
+  }
+});
+
+
 // Создаем периодическое обновление
 chrome.alarms.create('updateComputers', {periodInMinutes: 1});
 

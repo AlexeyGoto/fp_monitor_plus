@@ -26,7 +26,7 @@
       "run_at": "document_start"
    } ],
    "description": "Аналитика и Мониторинг статуса компьютеров MTS FogPlay",
-   "host_permissions": [ "https://fogplay.mts.ru/*" ],
+   "host_permissions": [ "https://fogplay.mts.ru/*", "https://api.fogstats.ru/*" ],
    "icons": {
       "128": "icons/icon128.png",
       "16": "icons/icon16.png",
