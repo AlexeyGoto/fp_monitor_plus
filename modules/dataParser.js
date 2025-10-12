@@ -484,6 +484,29 @@ function mergeSessions(existing, pageSessions) {
   return { newCount, updatedCount };
 }
 
+// ——— Выбрать цель для фронт-прогона: самая старая открытая, иначе просто самая старая ———
+function pickTargetSession(existing) {
+  let oldestOpen = null;   // {id, startISO, ts}
+  let oldestAny  = null;   // {id, startISO, ts}
+
+  for (const [id, s] of Object.entries(existing || {})) {
+    const iso = s?.startTime || null;
+    if (!iso) continue;
+    const ts = new Date(iso.replace(' ', 'T')).getTime();
+    if (!isFinite(ts)) continue;
+
+    // любая самая старая
+    if (!oldestAny || ts < oldestAny.ts) oldestAny = { id, startISO: iso, ts };
+
+    // самая старая ОТКРЫТАЯ
+    if (isOpenSession(s)) {
+      if (!oldestOpen || ts < oldestOpen.ts) oldestOpen = { id, startISO: iso, ts };
+    }
+  }
+
+  return oldestOpen || oldestAny || null; // {id, startISO, ts} | null
+}
+
 // ====== REVIEWS: парсер одной страницы ======
 function parseReviewsPage(html) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -1055,6 +1078,97 @@ async function quickFrontSweep(depthPages = 5) {
   return { success: true, pagesProcessed, newFound, updated };
 }
 
+// ——— Фронт-прогон до «цели» (самая старая открытая, иначе самая старая) + 1 страница ———
+async function frontSweepToTargetPlusOne() {
+  const { sessions: cached = {} } = await chrome.storage.local.get(['sessions']);
+  const existing = { ...(cached || {}) };
+
+  const target = pickTargetSession(existing);
+  if (!target) {
+    // кеш пуст — просто пройдём первые 1-2 страницы, чтобы зацепиться
+    let newFound = 0, updated = 0, pagesProcessed = 0;
+    for (let page = 1; page <= 2; page++) {
+      const baseDelay = delayManager.getCurrentDelay();
+      const jitter = PARSE_CONFIG.delayJitterMin + Math.random() * (PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin);
+      await waiting(Math.round(baseDelay * jitter));
+
+      const html = await fetchHtmlWithRetry(
+        `https://fogplay.mts.ru/merchant/?page=${page}&_=${Date.now()}`,
+        { retries: 3, label: `front-empty p=${page}` }
+      );
+      const ps = parsePage(html);
+      const r = mergeSessions(existing, ps);
+      newFound += r.newCount; updated += r.updatedCount; pagesProcessed++;
+
+      if (!ps.length) break;
+    }
+    if (newFound || updated) {
+      const stats = calculateStatsFromSessions(existing);
+      await chrome.storage.local.set({ sessions: existing, statistics: stats, lastUpdate: new Date().toISOString() });
+    }
+    console.log('[FrontToTarget] no target, primed first pages:', { pagesProcessed: 2 });
+    return { success: true, primed: true };
+  }
+
+  let page = 1;
+  let foundOn = null;
+  let pagesProcessed = 0, newFound = 0, updated = 0;
+
+  while (true) {
+    const baseDelay = delayManager.getCurrentDelay();
+    const jitter = PARSE_CONFIG.delayJitterMin + Math.random() * (PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin);
+    await waiting(Math.round(baseDelay * jitter));
+
+    const html = await fetchHtmlWithRetry(
+      `https://fogplay.mts.ru/merchant/?page=${page}&_=${Date.now()}`,
+      { retries: 3, label: `front->target p=${page}` }
+    );
+    const ps = parsePage(html);
+    if (!ps.length) break; // хвост
+
+    const r = mergeSessions(existing, ps);
+    newFound += r.newCount; updated += r.updatedCount;
+    pagesProcessed++;
+
+    // нашли нужную сессию?
+    if (ps.some(x => String(x.id) === String(target.id))) {
+      foundOn = page;
+      break;
+    }
+
+    if (pagesProcessed % (PARSE_CONFIG.saveEveryPages || 5) === 0) {
+      const stats = calculateStatsFromSessions(existing);
+      await chrome.storage.local.set({ sessions: existing, statistics: stats, lastUpdate: new Date().toISOString() });
+    }
+
+    page++;
+  }
+
+  // плюс одна страница после найденной
+  if (foundOn != null) {
+    const nextPage = foundOn + 1;
+    const baseDelay = delayManager.getCurrentDelay();
+    const jitter = PARSE_CONFIG.delayJitterMin + Math.random() * (PARSE_CONFIG.delayJitterMax - PARSE_CONFIG.delayJitterMin);
+    await waiting(Math.round(baseDelay * jitter));
+
+    const html2 = await fetchHtmlWithRetry(
+      `https://fogplay.mts.ru/merchant/?page=${nextPage}&_=${Date.now()}`,
+      { retries: 3, label: `front->target p=${nextPage}` }
+    );
+    const ps2 = parsePage(html2);
+    const r2 = mergeSessions(existing, ps2);
+    newFound += r2.newCount; updated += r2.updatedCount; pagesProcessed++;
+  }
+
+  if (newFound || updated) {
+    const stats = calculateStatsFromSessions(existing);
+    await chrome.storage.local.set({ sessions: existing, statistics: stats, lastUpdate: new Date().toISOString() });
+  }
+
+  console.log('[FrontToTarget] done:', { targetId: target.id, foundOn, pagesProcessed, newFound, updated });
+  return { success: true, targetId: target.id, foundOn, pagesProcessed, newFound, updated };
+}
+
 // таймер keep-alive: регулярно гоняем quickFrontSweep(5) и иногда отзывы
 let __lastReviewsTick = 0;
 
@@ -1080,10 +1194,12 @@ function startRecentPagesWatcher(pages = 5, minMinutes = 1, maxMinutes = 3) {
         await chrome.storage.local.get(['keepAliveSessionsTs', 'keepAliveReviewsTs']);
       const now = Date.now();
 
-      // 1) быстрый прогон сессий — не чаще, чем раз в KEEPALIVE.sessionsMs
+      // 1) быстрый прогон с первой страницы до «цели» +1 — не чаще KEEPALIVE.sessionsMs
       if (now - keepAliveSessionsTs >= KEEPALIVE.sessionsMs) {
-        await quickFrontSweep(pages);
+        await frontSweepToTargetPlusOne();
         await chrome.storage.local.set({ keepAliveSessionsTs: Date.now() });
+
+        // затем отзывы (как было ниже) …
       } else {
         console.debug('[KeepAlive] sessions throttle: skip');
       }
@@ -1162,6 +1278,8 @@ window.DataParser = {
     parseReviewsPage,
     quickReviewFrontSweep,
     fetchAllReviewsFull,
+    frontSweepToTargetPlusOne,
+    pickTargetSession,
     resyncAllSessions
 };
 
