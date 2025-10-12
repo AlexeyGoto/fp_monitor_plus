@@ -10,7 +10,7 @@ function waiting(ms) {
 
 // Кулдауны keep-alive (жёсткие)
 const KEEPALIVE = {
-  sessionsMs: 5 * 60_000,   // быстрый прогон сессий — не чаще 1 раза в 5 минут
+  sessionsMs: 4 * 60_000,   // быстрый прогон сессий — не чаще 1 раза в 4 минут
   reviewsMs:  15 * 60_000,  // фронт-скан отзывов — не чаще 1 раза в 15 минут
 };
 
@@ -19,6 +19,20 @@ const REVIEWS_CONFIG = {
   retentionDays: 180,   // насколько глубоко по времени нам реально нужны отзывы
   frontPages: 2,        // быстрый фронт-скан при открытии ПК
   stopAfterOldPages: 2  // если подряд N страниц целиком старше cutoff — останавливаем полный проход
+};
+
+// Историческая подкачка (настройки и ключи storage)
+const HISTORY_CONFIG = {
+  enabledKey: 'historyBackfillEnabled',   // флаг "вкл/выкл"
+  anchorKey:  'historyAnchor',            // где хранится якорь
+  busyKey:    'historyBusy',
+  pagesPerTick: 4,                        // сколько страниц добираем за один тик
+};
+
+// Историческая подкачка ОТЗЫВОВ
+const REVIEWS_HISTORY_CONFIG = {
+  anchorKey: 'historyReviewsAnchor', // ключ якоря в chrome.storage
+  pagesPerTick: 1                    // по одной странице за тик
 };
 
 // Конфигурация парсинга для снижения нагрузки и избежания 504
@@ -36,6 +50,11 @@ const PARSE_CONFIG = {
 }; 
 const FRONT_SCAN_PAGES = 3;            // Было в старой стратегии, сейчас не используется
 const INCREMENTAL_EXISTING_PAGES_LIMIT_DEFAULT = 5; // По умолчанию 5 страниц подряд без новых → стоп
+
+// === Историческая подкачка — помощники
+const isAnchorDone = (a) => !!a && Number(a.nextPage) > Number(a.lastPageSnapshot);
+const hasWorkLeft  = (a) => !!a && Number(a.nextPage) <= Number(a.lastPageSnapshot);
+
 
 // Класс для управления умными задержками
 class SmartDelayManager {
@@ -507,6 +526,85 @@ function pickTargetSession(existing) {
   return oldestOpen || oldestAny || null; // {id, startISO, ts} | null
 }
 
+// —— Историческая подкачка: якорь и тикер ——
+
+// Создать/обновить якорь, если его нет
+// Создать/обновить якорь для СЕССИЙ (без «перезапуска с 1 страницы»)
+async function ensureHistoryAnchor() {
+  const key = HISTORY_CONFIG.anchorKey;
+  const { [key]: anchor = null } = await chrome.storage.local.get([key]);
+  if (anchor && typeof anchor.nextPage === 'number' && typeof anchor.lastPageSnapshot === 'number') {
+    return anchor;
+  }
+  const lastPage = await findLastPageByDoubling().catch(() => 1);
+  const fresh = {
+    nextPage: 1,
+    lastPageSnapshot: lastPage,
+    currentPage: 0,
+    pageDateISO: null,
+    cyclesDone: 0,
+    done: false,
+    lastRunTs: Date.now()
+  };
+  await chrome.storage.local.set({ [key]: fresh });
+  return fresh;
+}
+
+
+// Сбросить якорь вручную (полезно в отладке или по кнопке)
+async function resetHistoryAnchor() {
+  await chrome.storage.local.remove([HISTORY_CONFIG.anchorKey]);
+}
+
+// Один тик исторической подкачки: проходим pagesPerTick страниц по якорю
+// Оркестратор: делает тик по сессиям и/или отзывам, умеет авто-стопить
+async function historicalBackfillTick(pagesPerTick = HISTORY_CONFIG.pagesPerTick) {
+  const { [HISTORY_CONFIG.enabledKey]: enabled = false } =
+    await chrome.storage.local.get([HISTORY_CONFIG.enabledKey]);
+  if (!enabled) return { success: true, skipped: true };
+
+  await chrome.storage.local.set({ [HISTORY_CONFIG.busyKey]: true });
+  try {
+    // читаем якоря, решаем по чём есть работа
+    const [{ [HISTORY_CONFIG.anchorKey]: sessA }, { [REVIEWS_HISTORY_CONFIG.anchorKey]: revA }] =
+      await Promise.all([
+        chrome.storage.local.get([HISTORY_CONFIG.anchorKey]),
+        chrome.storage.local.get([REVIEWS_HISTORY_CONFIG.anchorKey])
+      ]);
+
+    const doSessions = hasWorkLeft(sessA || (await ensureHistoryAnchor()));
+    const doReviews  = hasWorkLeft(revA  || (await ensureReviewsHistoryAnchor()));
+
+    let resS = { done: !doSessions }, resR = { done: !doReviews };
+
+    if (doSessions) resS = await _tickSessionsNoBusy(pagesPerTick);
+    if (doReviews)  resR = await _tickReviewsNoBusy(REVIEWS_HISTORY_CONFIG.pagesPerTick || 1);
+
+    const allDone = !!resS.done && !!resR.done;
+
+    if (allDone) {
+      // полностью закончили: выключаем переключатель
+      await chrome.storage.local.set({ [HISTORY_CONFIG.enabledKey]: false });
+    }
+
+    console.log('[HistoryTick] done:', {
+      sessions: { processed: resS.processed|0, done: resS.done },
+      reviews : { processed: resR.processed|0, done: resR.done },
+      allDone
+    });
+
+    return {
+      success: true,
+      sessions: resS,
+      reviews:  resR,
+      allDone
+    };
+  } finally {
+    await chrome.storage.local.set({ [HISTORY_CONFIG.busyKey]: false });
+  }
+}
+
+
 // ====== REVIEWS: парсер одной страницы ======
 function parseReviewsPage(html) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -607,6 +705,103 @@ async function findLastReviewsPageByDoubling() {
     return 1;
   }
 }
+
+// Создать/обновить якорь для ОТЗЫВОВ
+async function ensureReviewsHistoryAnchor() {
+  const key = REVIEWS_HISTORY_CONFIG.anchorKey;
+  const { [key]: anchor = null } = await chrome.storage.local.get([key]);
+  if (anchor && typeof anchor.nextPage === 'number' && typeof anchor.lastPageSnapshot === 'number') {
+    return anchor;
+  }
+  const lastPage = await findLastReviewsPageByDoubling().catch(() => 1);
+  const fresh = {
+    nextPage: 1,
+    lastPageSnapshot: lastPage,
+    currentPage: 0,
+    pageDateISO: null,
+    cyclesDone: 0,
+    done: false,
+    lastRunTs: Date.now()
+  };
+  await chrome.storage.local.set({ [key]: fresh });
+  return fresh;
+}
+
+// Один тик исторической подкачки ОТЗЫВОВ (проходим N страниц)
+async function historicalBackfillReviewsTick(pagesPerTick = REVIEWS_HISTORY_CONFIG.pagesPerTick) {
+  // Подкачка отзывов включается тем же флагом, что и подкачка сессий —
+  // если нужно отдельно — вынеси в свой ключ enabledKey.
+  const { [HISTORY_CONFIG.enabledKey]: enabled = false } =
+    await chrome.storage.local.get([HISTORY_CONFIG.enabledKey]);
+  if (!enabled) return { success: true, skipped: true };
+
+  let anchor = await ensureReviewsHistoryAnchor();
+
+  const { reviewsByPc: cache = {} } = await chrome.storage.local.get(['reviewsByPc']);
+  const reviewsByPc = { ...(cache || {}) };
+
+  let processed = 0, added = 0, updated = 0;
+
+  while (processed < pagesPerTick) {
+    try {
+      if (anchor.nextPage > anchor.lastPageSnapshot) {
+        const lp = await findLastReviewsPageByDoubling().catch(() => anchor.lastPageSnapshot || 1);
+        anchor.lastPageSnapshot = lp || 1;
+        anchor.nextPage = 1;
+        anchor.cyclesDone = (anchor.cyclesDone || 0) + 1;
+      }
+
+      const page = anchor.nextPage;
+      const resp = await fetchWithTiming(`https://fogplay.mts.ru/merchant/report/review/index/?page=${page}&_=${Date.now()}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const html = await resp.text();
+
+      const list = parseReviewsPage(html);
+      const r = mergeReviews(reviewsByPc, list);
+      added += r.added; updated += r.updated;
+      processed++;
+
+      // Берём «нижнюю» дату страницы (обычно самая старая)
+      const pageDateISO = list.length
+        ? (list[list.length - 1]?.startISO || list[0]?.startISO || null)
+        : null;
+
+      anchor.nextPage = page + 1;
+      anchor.currentPage = page;
+      anchor.pageDateISO = pageDateISO || null;
+
+      // периодически сохраняем
+      if (processed % (PARSE_CONFIG.saveEveryPages || 5) === 0) {
+        await chrome.storage.local.set({
+          reviewsByPc,
+          reviewsLastUpdate: new Date().toISOString(),
+          [REVIEWS_HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now() }
+        });
+      }
+
+      // страховка: если страница пустая — уточняем хвост
+      if (list.length === 0) {
+        const lp = await findLastReviewsPageByDoubling().catch(() => 1);
+        anchor.lastPageSnapshot = lp || 1;
+        anchor.nextPage = Math.min(anchor.nextPage, anchor.lastPageSnapshot);
+      }
+    } catch (e) {
+      // если что-то пошло не так — просто выходим из цикла текущего тика
+      console.warn('[HistoryTick:reviews] page error:', e?.message || e);
+      break;
+    }
+  }
+
+  await chrome.storage.local.set({
+    reviewsByPc,
+    reviewsLastUpdate: new Date().toISOString(),
+    [REVIEWS_HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now() }
+  });
+
+  console.log('[HistoryTick:reviews] done:', { processed, added, updated, anchor });
+  return { success: true, processed, added, updated, anchor };
+}
+
 
 // ====== REVIEWS: быстрый фронт-скан 1..N страниц ======
 async function quickReviewFrontSweep(depthPages = REVIEWS_CONFIG.frontPages || 2) {
@@ -1042,6 +1237,119 @@ async function resyncAllSessions() {
 }
 
 
+// --- СЕССИИ: один тик без busy ---
+async function _tickSessionsNoBusy(pagesPerTick = HISTORY_CONFIG.pagesPerTick) {
+  let anchor = await ensureHistoryAnchor();
+  if (isAnchorDone(anchor)) {
+    anchor.done = true;
+    await chrome.storage.local.set({ [HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now() } });
+    return { processed: 0, newFound: 0, updated: 0, done: true, anchor };
+  }
+
+  const { sessions: cached = {} } = await chrome.storage.local.get(['sessions']);
+  const existing = { ...(cached || {}) };
+
+  const pagesLeft = Math.max(0, (anchor.lastPageSnapshot || 1) - ((anchor.nextPage - 1) || 0));
+  const toProcess = Math.min(pagesPerTick || 1, pagesLeft || 0);
+
+  let processed = 0, newFound = 0, updated = 0;
+
+  for (let i = 0; i < toProcess; i++) {
+    const page = anchor.nextPage;
+    const html = await fetchHtmlWithRetry(
+      `https://fogplay.mts.ru/merchant/?page=${page}&_=${Date.now()}`,
+      { retries: 3, label: `history:sessions p=${page}` }
+    );
+
+    const ps = parsePage(html);
+    const r  = mergeSessions(existing, ps);
+    newFound += r.newCount; updated += r.updatedCount; processed++;
+
+    const pageDateISO = (ps[ps.length - 1]?.data?.startTime) || (ps[0]?.data?.startTime) || null;
+    anchor.currentPage = page;
+    anchor.pageDateISO = pageDateISO || null;
+    anchor.nextPage = page + 1;
+
+    if (processed % (PARSE_CONFIG.saveEveryPages || 5) === 0) {
+      const stats = calculateStatsFromSessions(existing);
+      await chrome.storage.local.set({
+        sessions: existing,
+        statistics: stats,
+        lastUpdate: new Date().toISOString(),
+        [HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now(), done: isAnchorDone(anchor) }
+      });
+    }
+  }
+
+  const stats = calculateStatsFromSessions(existing);
+  anchor.done = isAnchorDone(anchor);
+  await chrome.storage.local.set({
+    sessions: existing,
+    statistics: stats,
+    lastUpdate: new Date().toISOString(),
+    [HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now(), done: anchor.done }
+  });
+
+  console.log('[HistoryTick:sessions] done:', { processed, newFound, updated, anchor });
+  return { processed, newFound, updated, done: anchor.done, anchor };
+}
+
+// --- ОТЗЫВЫ: один тик без busy ---
+async function _tickReviewsNoBusy(pagesPerTick = REVIEWS_HISTORY_CONFIG.pagesPerTick) {
+  let anchor = await ensureReviewsHistoryAnchor();
+  if (isAnchorDone(anchor)) {
+    anchor.done = true;
+    await chrome.storage.local.set({ [REVIEWS_HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now() } });
+    return { processed: 0, added: 0, updated: 0, done: true, anchor };
+  }
+
+  const { reviewsByPc: cache = {} } = await chrome.storage.local.get(['reviewsByPc']);
+  const reviewsByPc = { ...(cache || {}) };
+
+  const pagesLeft = Math.max(0, (anchor.lastPageSnapshot || 1) - ((anchor.nextPage - 1) || 0));
+  const toProcess = Math.min(pagesPerTick || 1, pagesLeft || 0);
+
+  let processed = 0, added = 0, updated = 0;
+
+  for (let i = 0; i < toProcess; i++) {
+    const page = anchor.nextPage;
+    const resp = await fetchWithTiming(`https://fogplay.mts.ru/merchant/report/review/index/?page=${page}&_=${Date.now()}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const html = await resp.text();
+
+    const list = parseReviewsPage(html);
+    const r = mergeReviews(reviewsByPc, list);
+    added += r.added; updated += r.updated; processed++;
+
+    const pageDateISO = list.length
+      ? (list[list.length - 1]?.startISO || list[0]?.startISO || null)
+      : null;
+
+    anchor.currentPage = page;
+    anchor.pageDateISO = pageDateISO || null;
+    anchor.nextPage = page + 1;
+
+    if (processed % (PARSE_CONFIG.saveEveryPages || 5) === 0) {
+      await chrome.storage.local.set({
+        reviewsByPc,
+        reviewsLastUpdate: new Date().toISOString(),
+        [REVIEWS_HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now(), done: isAnchorDone(anchor) }
+      });
+    }
+  }
+
+  anchor.done = isAnchorDone(anchor);
+  await chrome.storage.local.set({
+    reviewsByPc,
+    reviewsLastUpdate: new Date().toISOString(),
+    [REVIEWS_HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now(), done: anchor.done }
+  });
+
+  console.log('[HistoryTick:reviews] done:', { processed, added, updated, anchor });
+  return { processed, added, updated, done: anchor.done, anchor };
+}
+
+
 // === quick front sweep: первые N страниц ===
 async function quickFrontSweep(depthPages = 5) {
   const { sessions: cached = {} } = await chrome.storage.local.get(['sessions']);
@@ -1215,6 +1523,17 @@ function startRecentPagesWatcher(pages = 5, minMinutes = 1, maxMinutes = 3) {
       } else {
         console.debug('[KeepAlive] reviews throttle: skip');
       }
+      // 3) историческая подкачка — если включена пользователем
+      try {
+        const { [HISTORY_CONFIG.enabledKey]: enabled = false } = await chrome.storage.local.get([HISTORY_CONFIG.enabledKey]);
+        if (enabled) {
+          await historicalBackfillTick(HISTORY_CONFIG.pagesPerTick);
+        } else {
+          // noop
+        }
+      } catch (e3) {
+        if (!isNetworkHiccup(e3)) console.warn('[KeepAlive] history warn:', e3?.message || e3);
+      }
 
     } catch (e) {
       if (isNetworkHiccup(e)) {
@@ -1280,6 +1599,14 @@ window.DataParser = {
     fetchAllReviewsFull,
     frontSweepToTargetPlusOne,
     pickTargetSession,
+    historicalBackfillTick,
+    ensureHistoryAnchor,
+    resetHistoryAnchor,
+    ensureReviewsHistoryAnchor,
+    historicalBackfillTick,
+    _tickSessionsNoBusy,
+    _tickReviewsNoBusy,
+    historicalBackfillReviewsTick,
     resyncAllSessions
 };
 
