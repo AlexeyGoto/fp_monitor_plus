@@ -51,6 +51,11 @@ const PARSE_CONFIG = {
 const FRONT_SCAN_PAGES = 3;            // Было в старой стратегии, сейчас не используется
 const INCREMENTAL_EXISTING_PAGES_LIMIT_DEFAULT = 5; // По умолчанию 5 страниц подряд без новых → стоп
 
+// === Историческая подкачка — помощники
+const isAnchorDone = (a) => !!a && Number(a.nextPage) > Number(a.lastPageSnapshot);
+const hasWorkLeft  = (a) => !!a && Number(a.nextPage) <= Number(a.lastPageSnapshot);
+
+
 // Класс для управления умными задержками
 class SmartDelayManager {
     constructor() {
@@ -524,24 +529,27 @@ function pickTargetSession(existing) {
 // —— Историческая подкачка: якорь и тикер ——
 
 // Создать/обновить якорь, если его нет
+// Создать/обновить якорь для СЕССИЙ (без «перезапуска с 1 страницы»)
 async function ensureHistoryAnchor() {
-  const { [HISTORY_CONFIG.anchorKey]: anchor = null } = await chrome.storage.local.get([HISTORY_CONFIG.anchorKey]);
-
+  const key = HISTORY_CONFIG.anchorKey;
+  const { [key]: anchor = null } = await chrome.storage.local.get([key]);
   if (anchor && typeof anchor.nextPage === 'number' && typeof anchor.lastPageSnapshot === 'number') {
-    return anchor; // всё ок
+    return anchor;
   }
-
-  // якоря нет — создаём с нуля
   const lastPage = await findLastPageByDoubling().catch(() => 1);
   const fresh = {
-    nextPage: 1,                // со следующего тика начнём с первой страницы
-    lastPageSnapshot: lastPage, // текущий «хвост» (будем обновлять при обёртке)
-    cyclesDone: 0,              // счётчик кругов (для статистики)
+    nextPage: 1,
+    lastPageSnapshot: lastPage,
+    currentPage: 0,
+    pageDateISO: null,
+    cyclesDone: 0,
+    done: false,
     lastRunTs: Date.now()
   };
-  await chrome.storage.local.set({ [HISTORY_CONFIG.anchorKey]: fresh });
+  await chrome.storage.local.set({ [key]: fresh });
   return fresh;
 }
+
 
 // Сбросить якорь вручную (полезно в отладке или по кнопке)
 async function resetHistoryAnchor() {
@@ -549,83 +557,53 @@ async function resetHistoryAnchor() {
 }
 
 // Один тик исторической подкачки: проходим pagesPerTick страниц по якорю
+// Оркестратор: делает тик по сессиям и/или отзывам, умеет авто-стопить
 async function historicalBackfillTick(pagesPerTick = HISTORY_CONFIG.pagesPerTick) {
-  const { [HISTORY_CONFIG.enabledKey]: enabled = false } = await chrome.storage.local.get([HISTORY_CONFIG.enabledKey]);
+  const { [HISTORY_CONFIG.enabledKey]: enabled = false } =
+    await chrome.storage.local.get([HISTORY_CONFIG.enabledKey]);
   if (!enabled) return { success: true, skipped: true };
 
-  await chrome.storage.local.set({ [HISTORY_CONFIG.busyKey]: true });   // <— busy on
+  await chrome.storage.local.set({ [HISTORY_CONFIG.busyKey]: true });
   try {
-    let anchor = await ensureHistoryAnchor();
-    const { sessions: cached = {} } = await chrome.storage.local.get(['sessions']);
-    const existing = { ...(cached || {}) };
+    // читаем якоря, решаем по чём есть работа
+    const [{ [HISTORY_CONFIG.anchorKey]: sessA }, { [REVIEWS_HISTORY_CONFIG.anchorKey]: revA }] =
+      await Promise.all([
+        chrome.storage.local.get([HISTORY_CONFIG.anchorKey]),
+        chrome.storage.local.get([REVIEWS_HISTORY_CONFIG.anchorKey])
+      ]);
 
-    let processed = 0, newFound = 0, updated = 0;
+    const doSessions = hasWorkLeft(sessA || (await ensureHistoryAnchor()));
+    const doReviews  = hasWorkLeft(revA  || (await ensureReviewsHistoryAnchor()));
 
-    while (processed < pagesPerTick) {
-      if (anchor.nextPage > anchor.lastPageSnapshot) {
-        const lp = await findLastPageByDoubling().catch(() => anchor.lastPageSnapshot || 1);
-        anchor.lastPageSnapshot = lp || 1;
-        anchor.nextPage = 1;
-        anchor.cyclesDone = (anchor.cyclesDone || 0) + 1;
-      }
+    let resS = { done: !doSessions }, resR = { done: !doReviews };
 
-      const page = anchor.nextPage;
-      const html = await fetchHtmlWithRetry(
-        `https://fogplay.mts.ru/merchant/?page=${page}&_=${Date.now()}`,
-        { retries: 3, label: `history p=${page}` }
-      );
+    if (doSessions) resS = await _tickSessionsNoBusy(pagesPerTick);
+    if (doReviews)  resR = await _tickReviewsNoBusy(REVIEWS_HISTORY_CONFIG.pagesPerTick || 1);
 
-      const ps = parsePage(html);
-      const r  = mergeSessions(existing, ps);
-      newFound += r.newCount; updated += r.updatedCount;
-      processed += 1;
+    const allDone = !!resS.done && !!resR.done;
 
-      // дата «якорной страницы» — берём самую позднюю/верхнюю или самую старшую/нижнюю.
-      // логичнее показать "нижнюю" (глубже во времени): обычно это последний элемент.
-      const pageDateISO = (ps[ps.length - 1]?.data?.startTime) || (ps[0]?.data?.startTime) || null;
-
-      anchor.nextPage = page + 1;
-      anchor.currentPage = page;            // <— чтобы UI показывал «страница»
-      anchor.pageDateISO = pageDateISO || null; // <— чтобы UI показывал «дату»
-
-      if (processed % (PARSE_CONFIG.saveEveryPages || 5) === 0) {
-        const stats = calculateStatsFromSessions(existing);
-        await chrome.storage.local.set({
-          sessions: existing,
-          statistics: stats,
-          lastUpdate: new Date().toISOString(),
-          [HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now() }
-        });
-      }
-
-      if (!ps.length) {
-        const lp = await findLastPageByDoubling().catch(() => 1);
-        anchor.lastPageSnapshot = lp || 1;
-        anchor.nextPage = Math.min(anchor.nextPage, anchor.lastPageSnapshot);
-      }
+    if (allDone) {
+      // полностью закончили: выключаем переключатель
+      await chrome.storage.local.set({ [HISTORY_CONFIG.enabledKey]: false });
     }
 
-    const stats = calculateStatsFromSessions(existing);
-    await chrome.storage.local.set({
-      sessions: existing,
-      statistics: stats,
-      lastUpdate: new Date().toISOString(),
-      [HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now() }
+    console.log('[HistoryTick] done:', {
+      sessions: { processed: resS.processed|0, done: resS.done },
+      reviews : { processed: resR.processed|0, done: resR.done },
+      allDone
     });
 
-    console.log('[HistoryTick] done:', { processed, newFound, updated, anchor });
-    try {
-      // после завершения страниц сессий — подкачиваем одну страницу отзывов
-      await historicalBackfillReviewsTick(1);
-    } catch (e) {
-      console.warn('[HistoryTick] reviews sub-tick error:', e?.message || e);
-    }    
-    console.log('[HistoryTick] done:', { processed, newFound, updated, anchor });
-    return { success: true, processed, newFound, updated, anchor };
+    return {
+      success: true,
+      sessions: resS,
+      reviews:  resR,
+      allDone
+    };
   } finally {
-    await chrome.storage.local.set({ [HISTORY_CONFIG.busyKey]: false }); // <— busy off
+    await chrome.storage.local.set({ [HISTORY_CONFIG.busyKey]: false });
   }
 }
+
 
 // ====== REVIEWS: парсер одной страницы ======
 function parseReviewsPage(html) {
@@ -730,23 +708,22 @@ async function findLastReviewsPageByDoubling() {
 
 // Создать/обновить якорь для ОТЗЫВОВ
 async function ensureReviewsHistoryAnchor() {
-  const { [REVIEWS_HISTORY_CONFIG.anchorKey]: anchor = null } =
-    await chrome.storage.local.get([REVIEWS_HISTORY_CONFIG.anchorKey]);
-
+  const key = REVIEWS_HISTORY_CONFIG.anchorKey;
+  const { [key]: anchor = null } = await chrome.storage.local.get([key]);
   if (anchor && typeof anchor.nextPage === 'number' && typeof anchor.lastPageSnapshot === 'number') {
     return anchor;
   }
-
   const lastPage = await findLastReviewsPageByDoubling().catch(() => 1);
   const fresh = {
     nextPage: 1,
     lastPageSnapshot: lastPage,
-    cyclesDone: 0,
-    lastRunTs: Date.now(),
     currentPage: 0,
-    pageDateISO: null
+    pageDateISO: null,
+    cyclesDone: 0,
+    done: false,
+    lastRunTs: Date.now()
   };
-  await chrome.storage.local.set({ [REVIEWS_HISTORY_CONFIG.anchorKey]: fresh });
+  await chrome.storage.local.set({ [key]: fresh });
   return fresh;
 }
 
@@ -1260,6 +1237,119 @@ async function resyncAllSessions() {
 }
 
 
+// --- СЕССИИ: один тик без busy ---
+async function _tickSessionsNoBusy(pagesPerTick = HISTORY_CONFIG.pagesPerTick) {
+  let anchor = await ensureHistoryAnchor();
+  if (isAnchorDone(anchor)) {
+    anchor.done = true;
+    await chrome.storage.local.set({ [HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now() } });
+    return { processed: 0, newFound: 0, updated: 0, done: true, anchor };
+  }
+
+  const { sessions: cached = {} } = await chrome.storage.local.get(['sessions']);
+  const existing = { ...(cached || {}) };
+
+  const pagesLeft = Math.max(0, (anchor.lastPageSnapshot || 1) - ((anchor.nextPage - 1) || 0));
+  const toProcess = Math.min(pagesPerTick || 1, pagesLeft || 0);
+
+  let processed = 0, newFound = 0, updated = 0;
+
+  for (let i = 0; i < toProcess; i++) {
+    const page = anchor.nextPage;
+    const html = await fetchHtmlWithRetry(
+      `https://fogplay.mts.ru/merchant/?page=${page}&_=${Date.now()}`,
+      { retries: 3, label: `history:sessions p=${page}` }
+    );
+
+    const ps = parsePage(html);
+    const r  = mergeSessions(existing, ps);
+    newFound += r.newCount; updated += r.updatedCount; processed++;
+
+    const pageDateISO = (ps[ps.length - 1]?.data?.startTime) || (ps[0]?.data?.startTime) || null;
+    anchor.currentPage = page;
+    anchor.pageDateISO = pageDateISO || null;
+    anchor.nextPage = page + 1;
+
+    if (processed % (PARSE_CONFIG.saveEveryPages || 5) === 0) {
+      const stats = calculateStatsFromSessions(existing);
+      await chrome.storage.local.set({
+        sessions: existing,
+        statistics: stats,
+        lastUpdate: new Date().toISOString(),
+        [HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now(), done: isAnchorDone(anchor) }
+      });
+    }
+  }
+
+  const stats = calculateStatsFromSessions(existing);
+  anchor.done = isAnchorDone(anchor);
+  await chrome.storage.local.set({
+    sessions: existing,
+    statistics: stats,
+    lastUpdate: new Date().toISOString(),
+    [HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now(), done: anchor.done }
+  });
+
+  console.log('[HistoryTick:sessions] done:', { processed, newFound, updated, anchor });
+  return { processed, newFound, updated, done: anchor.done, anchor };
+}
+
+// --- ОТЗЫВЫ: один тик без busy ---
+async function _tickReviewsNoBusy(pagesPerTick = REVIEWS_HISTORY_CONFIG.pagesPerTick) {
+  let anchor = await ensureReviewsHistoryAnchor();
+  if (isAnchorDone(anchor)) {
+    anchor.done = true;
+    await chrome.storage.local.set({ [REVIEWS_HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now() } });
+    return { processed: 0, added: 0, updated: 0, done: true, anchor };
+  }
+
+  const { reviewsByPc: cache = {} } = await chrome.storage.local.get(['reviewsByPc']);
+  const reviewsByPc = { ...(cache || {}) };
+
+  const pagesLeft = Math.max(0, (anchor.lastPageSnapshot || 1) - ((anchor.nextPage - 1) || 0));
+  const toProcess = Math.min(pagesPerTick || 1, pagesLeft || 0);
+
+  let processed = 0, added = 0, updated = 0;
+
+  for (let i = 0; i < toProcess; i++) {
+    const page = anchor.nextPage;
+    const resp = await fetchWithTiming(`https://fogplay.mts.ru/merchant/report/review/index/?page=${page}&_=${Date.now()}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const html = await resp.text();
+
+    const list = parseReviewsPage(html);
+    const r = mergeReviews(reviewsByPc, list);
+    added += r.added; updated += r.updated; processed++;
+
+    const pageDateISO = list.length
+      ? (list[list.length - 1]?.startISO || list[0]?.startISO || null)
+      : null;
+
+    anchor.currentPage = page;
+    anchor.pageDateISO = pageDateISO || null;
+    anchor.nextPage = page + 1;
+
+    if (processed % (PARSE_CONFIG.saveEveryPages || 5) === 0) {
+      await chrome.storage.local.set({
+        reviewsByPc,
+        reviewsLastUpdate: new Date().toISOString(),
+        [REVIEWS_HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now(), done: isAnchorDone(anchor) }
+      });
+    }
+  }
+
+  anchor.done = isAnchorDone(anchor);
+  await chrome.storage.local.set({
+    reviewsByPc,
+    reviewsLastUpdate: new Date().toISOString(),
+    [REVIEWS_HISTORY_CONFIG.anchorKey]: { ...anchor, lastRunTs: Date.now(), done: anchor.done }
+  });
+
+  console.log('[HistoryTick:reviews] done:', { processed, added, updated, anchor });
+  return { processed, added, updated, done: anchor.done, anchor };
+}
+
+
 // === quick front sweep: первые N страниц ===
 async function quickFrontSweep(depthPages = 5) {
   const { sessions: cached = {} } = await chrome.storage.local.get(['sessions']);
@@ -1513,6 +1603,9 @@ window.DataParser = {
     ensureHistoryAnchor,
     resetHistoryAnchor,
     ensureReviewsHistoryAnchor,
+    historicalBackfillTick,
+    _tickSessionsNoBusy,
+    _tickReviewsNoBusy,
     historicalBackfillReviewsTick,
     resyncAllSessions
 };
