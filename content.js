@@ -179,6 +179,19 @@ async function injectAsidePlatformLoadInMenu(){
   _fpmpLoadTimer = setInterval(refresh, 120000);
 }
 
+async function setCatVisibility(animEl) {
+  const {
+    historyBackfillEnabled = false,
+    historyAnchor = null,
+    historyReviewsAnchor = null
+  } = await chrome.storage.local.get(['historyBackfillEnabled','historyAnchor','historyReviewsAnchor']);
+
+  const hasWork = (a) => !!a && Number(a.nextPage) <= Number(a.lastPageSnapshot);
+
+  const show = historyBackfillEnabled && (hasWork(historyAnchor) || hasWork(historyReviewsAnchor));
+  animEl?.classList.toggle('off', !show);
+}
+
 /* ================== Верхняя строка «Компьютеры» ================== */
 async function injectComputersHeader(){
   if (!/^\/merchant\/computers\/?$/.test(location.pathname)) return;
@@ -230,18 +243,38 @@ async function injectComputersHeader(){
   }
 
   // toggle
-  toggleEl.addEventListener('change', async (ev)=>{
-    const enabled=!!ev.target.checked;
-    await chrome.storage.local.set({ historyBackfillEnabled: enabled });
-    if (!enabled) return setCat(false, null);
-    try{
-      const a=await window.DataParser.ensureHistoryAnchor();
-      pageEl.textContent = a?.currentPage ?? (a?.nextPage ? a.nextPage-1 : '—');
-      dateEl.textContent = fmtRu(a?.pageDateISO);
-      lastEl.textContent = a?.lastPageSnapshot ?? '—';
-      setCat(true, a);
-    }catch(e){ dlog('ensureHistoryAnchor error', e); }
-  });
+toggleEl.addEventListener('change', async (ev) => {
+  const enabled = !!ev.target.checked;
+  await chrome.storage.local.set({ historyBackfillEnabled: enabled });
+
+  if (!enabled) {                     // выключили — просто спрячем кота
+    await setCatVisibility(animEl);
+    return;
+  }
+
+  // включили → если прошлые якоря «дошли до конца» или их нет — сбрасываем
+  const { historyAnchor=null, historyReviewsAnchor=null } =
+    await chrome.storage.local.get(['historyAnchor','historyReviewsAnchor']);
+
+  const done = (a) => !!a && Number(a.nextPage) > Number(a.lastPageSnapshot);
+
+  if (!historyAnchor || done(historyAnchor)) {
+    await window.DataParser.resetHistoryAnchor();
+  }
+  if (!historyReviewsAnchor || done(historyReviewsAnchor)) {
+    await window.DataParser.resetReviewsHistoryAnchor();
+  }
+
+  // форс-инициализация, чтобы UI сразу получил дату/страницу
+  try { await window.DataParser.ensureHistoryAnchor(); } catch {}
+  try { await window.DataParser.ensureReviewsHistoryAnchor(); } catch {}
+
+  // можно пнуть один тик, чтобы сразу пошло
+  try { await window.DataParser.historicalBackfillTick(1); } catch {}
+
+  await setCatVisibility(animEl);
+});
+
 
   // live updates
   chrome.storage.onChanged.addListener(async (changes, area)=>{
@@ -259,8 +292,16 @@ async function injectComputersHeader(){
       const { historyAnchor=null } = await chrome.storage.local.get(['historyAnchor']);
       setCat(en, historyAnchor);
     }
+    if (changes.historyBackfillEnabled && toggleEl) {
+      toggleEl.checked = !!changes.historyBackfillEnabled.newValue;
+      // и сразу обновим кота
+      setCatVisibility(animEl);
+    }
   });
 }
+
+
+
 
 /* ================== Меню (Статистика/Аналитика) ================== */
 function bootSideMenu(){
