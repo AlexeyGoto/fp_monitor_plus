@@ -349,3 +349,94 @@ onReady(init);
   history.replaceState=function(){ _replace.apply(this,arguments); reb(); };
   window.addEventListener('popstate', reb);
 })();
+
+
+// === FP: "Поддержать проект" — в правой части заголовка "Аналитика по сессиям" ===
+(() => {
+  const URL = 'https://yoomoney.ru/to/410017500207329';
+  const NODE_ID = 'fp-support-hdr';
+
+  // чтобы не дублировалось
+  if (document.getElementById(NODE_ID)) return;
+
+  function findAnalyticsHeader() {
+    // ищем h1/h2 с текстом "Аналитика по сессиям" (допускаем вариации регистра и пробелов)
+    const heads = document.querySelectorAll('h1, h2');
+    for (const h of heads) {
+      const t = (h.textContent || '').toLowerCase();
+      if (t.includes('аналитик') && t.includes('сесс')) return h;
+    }
+    return null;
+  }
+
+  function ensureStyles() {
+    if (document.querySelector('style[data-fp-support-hdr]')) return;
+    const s = document.createElement('style');
+    s.setAttribute('data-fp-support-hdr', '1');
+    s.textContent = `
+      [data-fp-analytics-title]{ position: relative; }
+      #${NODE_ID}{
+        position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+        display: inline-flex; z-index: 10;
+      }
+      #${NODE_ID} .fp-support-link{
+        display:inline-flex; align-items:center; gap:8px;
+        height: 32px; padding: 0 12px; border-radius: 12px;
+        border: 1px solid rgba(255,255,255,.18);
+        background: rgba(255,255,255,.06);
+        -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+        color: rgba(255,255,255,.92); text-decoration: none; font-size: 13px; line-height: 1;
+        box-shadow: 0 1px 3px rgba(0,0,0,.2);
+        transition: transform .12s ease, box-shadow .12s ease, background .12s ease, border-color .12s ease;
+      }
+      #${NODE_ID} .fp-support-link:hover{
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgba(0,0,0,.25);
+        background: rgba(255,255,255,.10);
+        border-color: rgba(255,255,255,.28);
+        text-decoration: none;
+      }
+      #${NODE_ID} .fp-support-link svg{ width:16px; height:16px; flex:0 0 16px; }
+      @media (max-width: 900px){ #${NODE_ID} .fp-support-link span{ display:none; } }
+    `;
+    document.head.appendChild(s);
+  }
+
+  function makeNode() {
+    const wrap = document.createElement('span');
+    wrap.id = NODE_ID;
+    wrap.innerHTML = `
+      <a class="fp-support-link" href="${URL}" target="_blank" rel="noopener noreferrer"
+         aria-label="Поддержать проект (откроется в новой вкладке)">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="currentColor" d="M12.1 21.35l-1.1-.99C5.14 15.36 2 12.5 2 8.9 2 6.2 4.2 4 6.9 4c1.7 0 3.3.8 4.3 2.09C12.9 4.8 14.5 4 16.2 4 18.9 4 21 6.2 21 8.9c0 3.6-3.14 6.46-8.9 11.46l-1.0.99z"/>
+        </svg>
+        <span>Поддержать проект</span>
+      </a>`;
+    return wrap;
+  }
+
+  function mount() {
+    try {
+      const hdr = findAnalyticsHeader();
+      if (!hdr) return false;
+      ensureStyles();
+      hdr.setAttribute('data-fp-analytics-title', '1'); // даём якорь для абсолютного позиционирования
+      if (!document.getElementById(NODE_ID)) hdr.appendChild(makeNode());
+      return true;
+    } catch { return false; }
+  }
+
+  // один проход сейчас…
+  const ok = mount();
+
+  // …и мягкое ожидание, если заголовок дорисуется позже (SPA)
+  if (!ok) {
+    const obs = new MutationObserver(() => {
+      if (mount()) obs.disconnect();
+    });
+    obs.observe(document.documentElement, { childList: true, subtree: true });
+    // авто-отключение через 20с, чтобы не держать наблюдатель бесконечно
+    setTimeout(() => obs.disconnect(), 20000);
+  }
+})();
