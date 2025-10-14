@@ -1,7 +1,7 @@
 // ===================== content.js =====================
 
 /* ================== DEBUG ================== */
-const DEBUG = true;
+const DEBUG = false;
 function dlog(...args){ if (DEBUG) try { console.log('[fpmp][content]', ...args); } catch{} }
 
 /* ========== Мини-лоадер для стат. экрана ========== */
@@ -65,7 +65,7 @@ function hasWork(anchor){
 }
 function onReady(fn){ (document.readyState==='loading') ? document.addEventListener('DOMContentLoaded', fn, {once:true}) : fn(); }
 
-/* Promise-обёртка над sendMessage с логами/lastError */
+/* Promise-обёртка над sendMessage */
 function sendMessage(msg){
   return new Promise((resolve) => {
     try{
@@ -86,27 +86,7 @@ function sendMessage(msg){
   });
 }
 
-/* ================== Статистика/Пивот как было ================== */
-async function showStatistic(e){
-  if (e) e.preventDefault();
-  FPLoader.showOverlay();
-  try{
-    const main=document.querySelector('main'); if(!main) return;
-    const {statistics, dateRange}=await chrome.storage.local.get(['statistics','dateRange']);
-    main.innerHTML='';
-    const c=document.createElement('div'); c.className='merchant-statistic-container';
-    if (statistics) c.insertAdjacentHTML('afterbegin', window.UIComponents?.dateRangeHtml||'');
-    main.appendChild(c);
-    const statsToShow = statistics ? (dateRange ? await window.DataFilter.filterStatsByDateRange(statistics,dateRange.start,dateRange.end) : statistics) : null;
-    if (window.UIComponents?.createStatisticHTML) c.appendChild(window.UIComponents.createStatisticHTML(statsToShow));
-    if (dateRange){ const s=document.getElementById('startDate'), e1=document.getElementById('endDate'); if(s) s.value=dateRange.start; if(e1) e1.value=dateRange.end; }
-    window.EventHandlers?.setupHandlers?.(c);
-    chrome.storage.onChanged.addListener((changes)=>{
-      if (changes.parsingMode){ const m=changes.parsingMode.newValue; if (m==='full'||m==='inc') FPLoader.showMini('Иду по страницам…'); if(m==='idle') FPLoader.hideMini(); }
-      if (changes.parsingProgress){ const v=changes.parsingProgress.newValue; if (v!=null) FPLoader.showMini(`Прогресс: ${(v*100|0)}%`); }
-    });
-  } finally { FPLoader.hideOverlay(); }
-}
+/* ================== Пивот ================== */
 async function showPivot(e){
   if (e) e.preventDefault();
   const main=document.querySelector('main'); if(!main) return;
@@ -115,7 +95,7 @@ async function showPivot(e){
   window.PivotRenderer?.renderPivotPage?.(c);
 }
 
-/* ================== Занятость платформы (верх меню) ================== */
+/* ================== Занятость платформы ================== */
 let _fpmpLoadTimer=null;
 async function injectAsidePlatformLoadInMenu(){
   const menu=document.querySelector('.merchant-aside-menu');
@@ -132,48 +112,29 @@ async function injectAsidePlatformLoadInMenu(){
   const bar=box.querySelector('.bar>i');
   const lbl=box.querySelector('#fpmp-aside-load-label');
 
-
-
-
-
-
   async function refresh() {
-    dlog('platformLoad: start');
     const res = await sendMessage({ type: 'fpmp:getPlatformLoad' });
     if (!res || res.ok === false) {
-      dlog('platformLoad: FAIL', res);
       bar.style.width = '0%';
       lbl.textContent = 'недоступно';
       return;
     }
-  
-    // --- НОРМАЛИЗАЦИЯ ЛЮБОЙ ФОРМЫ ОТВЕТА ---
-    let payload = res?.data;              // может быть числом, строкой или объектом { percentage }
+    let payload = res?.data;
     let raw =
-        (payload && typeof payload === 'object' && 'percentage' in payload) ? payload.percentage :
-        (typeof payload === 'number') ? payload :
-        (typeof payload === 'string') ? parseFloat(payload) :
-        (typeof res?.percentage === 'number') ? res.percentage :
-        (typeof res?.value === 'number') ? res.value :
-        (typeof res?.raw === 'number') ? res.raw :
-        (typeof res?.raw === 'string') ? parseFloat(res.raw) :
-        0;
-  
+      (payload && typeof payload === 'object' && 'percentage' in payload) ? payload.percentage :
+      (typeof payload === 'number') ? payload :
+      (typeof payload === 'string') ? parseFloat(payload) :
+      (typeof res?.percentage === 'number') ? res.percentage :
+      (typeof res?.value === 'number') ? res.value :
+      (typeof res?.raw === 'number') ? res.raw :
+      (typeof res?.raw === 'string') ? parseFloat(res.raw) :
+      0;
     if (!Number.isFinite(raw)) raw = 0;
-  
-    // принимаем 0..1 как долю, иначе как %
     const val = raw <= 1 ? Math.round(raw * 100) : Math.round(raw);
-  
-    dlog('platformLoad: OK', { raw, parsed: val, res });
-  
     bar.style.width = `${val}%`;
     lbl.textContent = `${val}%`;
   }
-
-
-  // экспорт для ручного вызова в консоли
   window.fpmpForceRefresh = refresh;
-
   await refresh();
   clearInterval(_fpmpLoadTimer);
   _fpmpLoadTimer = setInterval(refresh, 120000);
@@ -185,10 +146,8 @@ async function setCatVisibility(animEl) {
     historyAnchor = null,
     historyReviewsAnchor = null
   } = await chrome.storage.local.get(['historyBackfillEnabled','historyAnchor','historyReviewsAnchor']);
-
-  const hasWork = (a) => !!a && Number(a.nextPage) <= Number(a.lastPageSnapshot);
-
-  const show = historyBackfillEnabled && (hasWork(historyAnchor) || hasWork(historyReviewsAnchor));
+  const hasW = (a) => !!a && Number(a.nextPage) <= Number(a.lastPageSnapshot);
+  const show = historyBackfillEnabled && (hasW(historyAnchor) || hasW(historyReviewsAnchor));
   animEl?.classList.toggle('off', !show);
 }
 
@@ -231,7 +190,6 @@ async function injectComputersHeader(){
   const animEl=row.querySelector('#fpmp-hist-anim');
   const setCat=(en,a)=> animEl.classList.toggle('off', !(en && hasWork(a)));
 
-  // init
   {
     const { historyBackfillEnabled=false, historyAnchor=null } =
       await chrome.storage.local.get(['historyBackfillEnabled','historyAnchor']);
@@ -242,41 +200,24 @@ async function injectComputersHeader(){
     setCat(historyBackfillEnabled, historyAnchor);
   }
 
-  // toggle
-toggleEl.addEventListener('change', async (ev) => {
-  const enabled = !!ev.target.checked;
-  await chrome.storage.local.set({ historyBackfillEnabled: enabled });
+  toggleEl.addEventListener('change', async (ev) => {
+    const enabled = !!ev.target.checked;
+    await chrome.storage.local.set({ historyBackfillEnabled: enabled });
 
-  if (!enabled) {                     // выключили — просто спрячем кота
+    if (!enabled) { await setCatVisibility(animEl); return; }
+
+    const { historyAnchor=null, historyReviewsAnchor=null } =
+      await chrome.storage.local.get(['historyAnchor','historyReviewsAnchor']);
+    const done = (a) => !!a && Number(a.nextPage) > Number(a.lastPageSnapshot);
+
+    if (!historyAnchor || done(historyAnchor)) { await window.DataParser.resetHistoryAnchor(); }
+    if (!historyReviewsAnchor || done(historyReviewsAnchor)) { await window.DataParser.resetReviewsHistoryAnchor(); }
+    try { await window.DataParser.ensureHistoryAnchor(); } catch {}
+    try { await window.DataParser.ensureReviewsHistoryAnchor(); } catch {}
+    try { await window.DataParser.historicalBackfillTick(1); } catch {}
     await setCatVisibility(animEl);
-    return;
-  }
+  });
 
-  // включили → если прошлые якоря «дошли до конца» или их нет — сбрасываем
-  const { historyAnchor=null, historyReviewsAnchor=null } =
-    await chrome.storage.local.get(['historyAnchor','historyReviewsAnchor']);
-
-  const done = (a) => !!a && Number(a.nextPage) > Number(a.lastPageSnapshot);
-
-  if (!historyAnchor || done(historyAnchor)) {
-    await window.DataParser.resetHistoryAnchor();
-  }
-  if (!historyReviewsAnchor || done(historyReviewsAnchor)) {
-    await window.DataParser.resetReviewsHistoryAnchor();
-  }
-
-  // форс-инициализация, чтобы UI сразу получил дату/страницу
-  try { await window.DataParser.ensureHistoryAnchor(); } catch {}
-  try { await window.DataParser.ensureReviewsHistoryAnchor(); } catch {}
-
-  // можно пнуть один тик, чтобы сразу пошло
-  try { await window.DataParser.historicalBackfillTick(1); } catch {}
-
-  await setCatVisibility(animEl);
-});
-
-
-  // live updates
   chrome.storage.onChanged.addListener(async (changes, area)=>{
     if (area!=='local') return;
     if (changes.historyAnchor){
@@ -291,46 +232,34 @@ toggleEl.addEventListener('change', async (ev) => {
       const en=!!changes.historyBackfillEnabled.newValue;
       const { historyAnchor=null } = await chrome.storage.local.get(['historyAnchor']);
       setCat(en, historyAnchor);
-    }
-    if (changes.historyBackfillEnabled && toggleEl) {
-      toggleEl.checked = !!changes.historyBackfillEnabled.newValue;
-      // и сразу обновим кота
-      setCatVisibility(animEl);
+      if (toggleEl) toggleEl.checked = en;
+      await setCatVisibility(animEl);
     }
   });
 }
 
-
-
-
-/* ================== Меню (Статистика/Аналитика) ================== */
+/* ================== Меню (только Pivot) ================== */
 function bootSideMenu(){
   try{
     if (!window.UIComponents || !window.UIComponents.addMenuItem) return false;
     window.UIComponents.addMenuItem();
     const q=location.search||'';
     if (q.includes('openPivot')) { showPivot(); return true; }
-    if (q.includes('openStats')) { showStatistic(); return true; }
     return true;
   }catch(e){ dlog('addMenuItem failed', e); return false; }
 }
 
 /* ================== Инициализация ================== */
 function init(){
-  // меню
   if (!bootSideMenu()){
     const moMenu=new MutationObserver(()=>{ if(bootSideMenu()) moMenu.disconnect(); });
     moMenu.observe(document.documentElement,{childList:true,subtree:true});
   }
-
-  // занятость сверху меню
   const ensureMenu=()=>{ if(document.querySelector('.merchant-aside-menu')){ injectAsidePlatformLoadInMenu(); return true; } return false; };
   if (!ensureMenu()){
     const mo=new MutationObserver(()=>{ if(ensureMenu()) mo.disconnect(); });
     mo.observe(document.documentElement,{childList:true,subtree:true});
   }
-
-  // верхняя строка на /merchant/computers
   const bootComputers=()=>{ try{ injectComputersHeader(); }catch(e){ dlog('hdr err',e);} };
   if (document.querySelector('.merchant-content')) bootComputers();
   else {
@@ -338,10 +267,9 @@ function init(){
     mo.observe(document.documentElement,{childList:true,subtree:true});
   }
 }
-
 onReady(init);
 
-// поддержка soft-навигации
+// soft-навигация
 (() => {
   const _push=history.pushState, _replace=history.replaceState;
   const reb=()=>setTimeout(()=>{ bootSideMenu(); try{injectAsidePlatformLoadInMenu();}catch{} try{injectComputersHeader();}catch{} },0);
@@ -350,17 +278,12 @@ onReady(init);
   window.addEventListener('popstate', reb);
 })();
 
-
-// === FP: "Поддержать проект" — в правой части заголовка "Аналитика по сессиям" ===
+// === Кнопка «Поддержать» на аналитике ===
 (() => {
   const URL = 'https://yoomoney.ru/to/410017500207329';
   const NODE_ID = 'fp-support-hdr';
-
-  // чтобы не дублировалось
   if (document.getElementById(NODE_ID)) return;
-
   function findAnalyticsHeader() {
-    // ищем h1/h2 с текстом "Аналитика по сессиям" (допускаем вариации регистра и пробелов)
     const heads = document.querySelectorAll('h1, h2');
     for (const h of heads) {
       const t = (h.textContent || '').toLowerCase();
@@ -368,40 +291,27 @@ onReady(init);
     }
     return null;
   }
-
   function ensureStyles() {
     if (document.querySelector('style[data-fp-support-hdr]')) return;
     const s = document.createElement('style');
     s.setAttribute('data-fp-support-hdr', '1');
     s.textContent = `
       [data-fp-analytics-title]{ position: relative; }
-      #${NODE_ID}{
-        position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
-        display: inline-flex; z-index: 10;
-      }
+      #${NODE_ID}{ position: absolute; right: 12px; top: 50%; transform: translateY(-50%); display: inline-flex; z-index: 10; }
       #${NODE_ID} .fp-support-link{
-        display:inline-flex; align-items:center; gap:8px;
-        height: 32px; padding: 0 12px; border-radius: 12px;
-        border: 1px solid rgba(255,255,255,.18);
-        background: rgba(255,255,255,.06);
+        display:inline-flex; align-items:center; gap:8px; height: 32px; padding: 0 12px; border-radius: 12px;
+        border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.06);
         -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
         color: rgba(255,255,255,.92); text-decoration: none; font-size: 13px; line-height: 1;
-        box-shadow: 0 1px 3px rgba(0,0,0,.2);
-        transition: transform .12s ease, box-shadow .12s ease, background .12s ease, border-color .12s ease;
+        box-shadow: 0 1px 3px rgba(0,0,0,.2); transition: transform .12s, box-shadow .12s, background .12s, border-color .12s;
       }
-      #${NODE_ID} .fp-support-link:hover{
-        transform: translateY(-1px);
-        box-shadow: 0 6px 16px rgba(0,0,0,.25);
-        background: rgba(255,255,255,.10);
-        border-color: rgba(255,255,255,.28);
-        text-decoration: none;
-      }
+      #${NODE_ID} .fp-support-link:hover{ transform: translateY(-1px); box-shadow: 0 6px 16px rgba(0,0,0,.25);
+        background: rgba(255,255,255,.10); border-color: rgba(255,255,255,.28); text-decoration: none; }
       #${NODE_ID} .fp-support-link svg{ width:16px; height:16px; flex:0 0 16px; }
       @media (max-width: 900px){ #${NODE_ID} .fp-support-link span{ display:none; } }
     `;
     document.head.appendChild(s);
   }
-
   function makeNode() {
     const wrap = document.createElement('span');
     wrap.id = NODE_ID;
@@ -415,28 +325,283 @@ onReady(init);
       </a>`;
     return wrap;
   }
-
   function mount() {
     try {
-      const hdr = findAnalyticsHeader();
-      if (!hdr) return false;
+      const hdr = findAnalyticsHeader(); if (!hdr) return false;
       ensureStyles();
-      hdr.setAttribute('data-fp-analytics-title', '1'); // даём якорь для абсолютного позиционирования
+      hdr.setAttribute('data-fp-analytics-title', '1');
       if (!document.getElementById(NODE_ID)) hdr.appendChild(makeNode());
       return true;
     } catch { return false; }
   }
-
-  // один проход сейчас…
   const ok = mount();
-
-  // …и мягкое ожидание, если заголовок дорисуется позже (SPA)
   if (!ok) {
-    const obs = new MutationObserver(() => {
-      if (mount()) obs.disconnect();
-    });
+    const obs = new MutationObserver(() => { if (mount()) obs.disconnect(); });
     obs.observe(document.documentElement, { childList: true, subtree: true });
-    // авто-отключение через 20с, чтобы не держать наблюдатель бесконечно
     setTimeout(() => obs.disconnect(), 20000);
   }
+})();
+
+/* ================== Массовые операции на /merchant/computers ================== */
+(function bulkOpsInit(){
+  try{
+    if (!/\/merchant\/computers\/?(\?|$)/.test(location.pathname+location.search)) return;
+
+    /* ---------- СТИЛИ: панель + «левый рейл» чекбоксов (зелёные галочки) ---------- */
+    const css = `
+      .fp-bulk-bar{display:flex;align-items:center;gap:12px;padding:10px 12px;margin:12px 0;
+        background:#0b1120;border:1px solid rgba(255,255,255,.08);border-radius:12px}
+      .fp-bulk-bar .sp{flex:1}
+      .fp-ui{appearance:none;-webkit-appearance:none;background:#0f172a;border:1px solid rgba(255,255,255,.14);
+        color:#e5e7eb;border-radius:12px;padding:8px 12px;min-height:36px;font-size:13px;line-height:1.2}
+      .fp-btn{background:#ff0032;border:1px solid #ff0032;color:#fff;border-radius:12px;padding:8px 14px;font-size:13px;cursor:pointer}
+      .fp-btn:disabled{opacity:.6;cursor:not-allowed}
+
+      /* «выбрать все» — квадрат в стиле ЛК */
+      .fp-all-wrap{position:relative;width:28px;height:28px;display:inline-block;vertical-align:middle}
+      .fp-all-wrap input{position:absolute;inset:0;opacity:0;cursor:pointer}
+      .fp-all-box{width:28px;height:28px;border-radius:8px;background:#0f172a;border:1px solid rgba(255,255,255,.18);
+        display:inline-block;box-shadow:inset 0 -1px 0 rgba(255,255,255,.04);position:relative}
+      .fp-all--on{border-color:#16a34a;background:linear-gradient(180deg,#22c55e,#16a34a)}
+      .fp-all--on::after{content:"";position:absolute;left:6px;top:9px;width:12px;height:6px;border-left:3px solid #fff;border-bottom:3px solid #fff;transform:rotate(-45deg);border-radius:1px}
+      .fp-all--mid::after{content:"";position:absolute;left:7px;right:7px;top:13px;height:2px;background:#fff;border-radius:2px}
+
+      /* чекбоксы ПК — вынесены ВНЕ карточки (слева), кликабельность карточек сохранена */
+      .merchant-computer{position:relative;margin-left:36px !important}
+      .fp-chk{position:absolute;left:-36px;top:18px;z-index:2;pointer-events:none}
+      .fp-chk input{position:absolute;inset:0;opacity:0;width:28px;height:28px;pointer-events:auto;cursor:pointer}
+      .fp-chk .box{position:relative;width:28px;height:28px;border-radius:8px;background:#0f172a;border:1px solid rgba(255,255,255,.18);
+        box-shadow:inset 0 -1px 0 rgba(255,255,255,.04);display:block}
+      .fp-chk input:focus + .box{outline:2px solid rgba(255,255,255,.18);outline-offset:2px}
+      .fp-chk input:checked + .box{border-color:#16a34a;background:linear-gradient(180deg,#22c55e,#16a34a)}
+      .fp-chk input:checked + .box::after{content:"";position:absolute;left:6px;top:7px;width:12px;height:6px;border-left:3px solid #fff;border-bottom:3px solid #fff;transform:rotate(-45deg);border-radius:1px}
+    `;
+    const style = document.createElement('style'); style.textContent = css; document.documentElement.appendChild(style);
+
+    /* ---------- helpers ---------- */
+    const q  = (s,r=document)=>r.querySelector(s);
+    const qq = (s,r=document)=>Array.from(r.querySelectorAll(s));
+    const csrfMeta = document.querySelector('meta[name="csrf-token"]')?.content || '';
+
+    const getCompId = (card)=>{
+      const a = card.querySelector('a.stretched-link'); if(!a) return null;
+      try{ return new URL(a.href, location.origin).searchParams.get('compId'); }catch{ return null; }
+    };
+
+    /* ---------- вытаскиваем список тарифов с любого ПК ---------- */
+    let tariffs = null;
+    async function ensureTariffs(){
+      if (tariffs) return tariffs;
+      const any = q('.merchant-computer'); const id = any ? getCompId(any) : null;
+      if (!id) return [];
+      const res = await fetch(`/merchant/computer-edit/?compId=${id}`, {credentials:'include'});
+      const html = await res.text();
+      const div = document.createElement('div'); div.innerHTML = html;
+      tariffs = Array.from(div.querySelectorAll('input[name="tariff[]"]')).map(inp=>{
+        const li = inp.closest('li');
+        const title = li?.querySelector('.form-field__label__title')?.textContent?.trim() || `ID ${inp.value}`;
+        return { id: inp.value, title };
+      });
+      return tariffs;
+    }
+
+    /* ---------- кеш данных формы редактирования (нужны для смены тарифа) ---------- */
+    const editCache = new Map(); // compId -> { csrf, active }
+    async function getEditInfo(compId){
+      if (editCache.has(compId)) return editCache.get(compId);
+      const res = await fetch(`/merchant/computer-edit/?compId=${compId}`, {credentials:'include'});
+      const html = await res.text();
+      const div = document.createElement('div'); div.innerHTML = html;
+
+      const csrf = div.querySelector('meta[name="csrf-token"]')?.content
+                || div.querySelector('input[name="_csrf-frontend"]')?.value
+                || csrfMeta
+                || '';
+      // на форме обычно есть hidden с текущим активом
+      let active = div.querySelector('[name="ComputerEditForm[active]"]')?.value;
+      if (active === undefined || active === null || active === '') active = '1';
+
+      const info = { csrf, active: String(active) };
+      editCache.set(compId, info);
+      return info;
+    }
+
+    /* ---------- верхняя панель ---------- */
+    function buildBar(){
+      const bar = document.createElement('div');
+      bar.className = 'fp-bulk-bar';
+      bar.innerHTML = `
+        <label style="display:flex;align-items:center;gap:10px;">
+          <span class="fp-all-wrap">
+            <input type="checkbox" id="fp-select-all">
+            <span class="fp-all-box" id="fp-all-box"></span>
+          </span>
+          <span>Выбрать все</span>
+        </label>
+        <span class="sp"></span>
+        <select id="fp-tariff" class="fp-ui"><option value="">Тариф: не менять</option></select>
+        <select id="fp-status" class="fp-ui">
+          <option value="">Статус: не менять</option>
+          <option value="1">Активировать</option>
+          <option value="0">Деактивировать</option>
+        </select>
+        <button id="fp-apply" class="fp-btn" disabled>Применить</button>`;
+      return bar;
+    }
+
+    /* ---------- чекбоксы на карточках (в левом рейле) ---------- */
+    function attachCheckboxes(root=document){
+      qq('.merchant-computer', root).forEach(card=>{
+        if (card.dataset.fpChk) return;
+        const id = getCompId(card); if(!id) return;
+        card.dataset.fpChk='1'; card.dataset.compId=id;
+
+        const lbl = document.createElement('label');
+        lbl.className = 'fp-chk';
+        lbl.innerHTML = `<input type="checkbox" class="fp-pc-checkbox"><span class="box"></span>`;
+        card.appendChild(lbl);
+
+        // если «выбрать все» уже включён — пометить новые
+        const sa = q('#fp-select-all');
+        if (sa && sa.checked && !sa.indeterminate) lbl.querySelector('input').checked = true;
+      });
+      recomputeSelectAll();
+      updateApplyState();
+    }
+
+    /* ---------- монтирование панели ---------- */
+    let mounted=false;
+    function mountBarWhenReady(){
+      if (mounted) return;
+      const host = q('.merchant-content-filters') || q('.merchant-content-header') || q('.merchant-content .merchant-content__header');
+      if (!host) return;
+      const bar = buildBar();
+      host.insertAdjacentElement('afterend', bar);
+      mounted = true;
+
+      // тарифы
+      ensureTariffs().then(list=>{
+        const sel = q('#fp-tariff');
+        list.forEach(t => sel.insertAdjacentHTML('beforeend', `<option value="${t.id}">${t.title}</option>`));
+      });
+
+      // обработчики верхней панели
+      const sa = q('#fp-select-all'); const saBox = q('#fp-all-box');
+      function repaintAllBox(){
+        saBox.classList.remove('fp-all--on','fp-all--mid');
+        if (sa.checked && !sa.indeterminate) saBox.classList.add('fp-all--on');
+        else if (sa.indeterminate) saBox.classList.add('fp-all--mid');
+      }
+      sa.addEventListener('change', ()=>{
+        const boxes = qq('.fp-pc-checkbox');
+        boxes.forEach(cb => cb.checked = sa.checked);
+        recomputeSelectAll();
+        updateApplyState();
+        repaintAllBox();
+      });
+      repaintAllBox();
+
+      const tariffSel = q('#fp-tariff');
+      const statusSel = q('#fp-status');
+      tariffSel.addEventListener('change', ()=>{ if (tariffSel.value) statusSel.value=''; updateApplyState(); });
+      statusSel.addEventListener('change', ()=>{ if (statusSel.value!=='') tariffSel.value=''; updateApplyState(); });
+
+      q('#fp-apply').addEventListener('click', applyBulk);
+    }
+
+    function selectedIds(){
+      return qq('.fp-pc-checkbox').filter(cb=>cb.checked)
+        .map(cb => cb.closest('.merchant-computer')?.dataset?.compId)
+        .filter(Boolean);
+    }
+
+    function recomputeSelectAll(){
+      const sa = q('#fp-select-all'); if (!sa) return;
+      const boxes = qq('.fp-pc-checkbox');
+      const checked = boxes.filter(b=>b.checked).length;
+      const total = boxes.length;
+      sa.indeterminate = checked>0 && checked<total;
+      sa.checked = total>0 && checked===total;
+
+      const saBox = q('#fp-all-box');
+      saBox.classList.remove('fp-all--on','fp-all--mid');
+      if (sa.checked && !sa.indeterminate) saBox.classList.add('fp-all--on');
+      else if (sa.indeterminate) saBox.classList.add('fp-all--mid');
+    }
+
+    function updateApplyState(){
+      const ids = selectedIds();
+      const tariff = q('#fp-tariff')?.value || '';
+      const status = q('#fp-status')?.value ?? '';
+      const btn = q('#fp-apply');
+      if (btn) btn.disabled = !(ids.length && (tariff || status !== ''));
+    }
+
+    /* ---------- POST: ИЛИ тариф (+ текущее active), ИЛИ статус ---------- */
+    async function postTariff(compId, tariffId){
+      // подтянем токен + текущее active один раз на ПК
+      const { csrf, active } = await getEditInfo(compId);
+      const body = new URLSearchParams();
+      body.set('ComputerEditForm[name]','');
+      body.set('ComputerEditForm[tariffId]', tariffId);
+      body.set('ComputerEditForm[active]', String(active)); // обязательно — иначе 400
+      body.set('_csrf-frontend', csrf || csrfMeta || '');
+      const res = await fetch(`/merchant/computer-edit/?compId=${compId}`, {
+        method:'POST', credentials:'include',
+        headers:{'content-type':'application/x-www-form-urlencoded;charset=UTF-8'},
+        body: body.toString()
+      });
+      return res.ok;
+    }
+
+    async function postStatus(compId, active){
+      const body = new URLSearchParams();
+      body.set('ComputerEditForm[name]','');
+      body.set('ComputerEditForm[active]', String(active));
+      body.set('_csrf-frontend', csrfMeta || '');
+      const res = await fetch(`/merchant/computer-edit/?compId=${compId}`, {
+        method:'POST', credentials:'include',
+        headers:{'content-type':'application/x-www-form-urlencoded;charset=UTF-8'},
+        body: body.toString()
+      });
+      return res.ok;
+    }
+
+    async function applyBulk(){
+      const ids = selectedIds(); if (!ids.length) return;
+      const tariff = q('#fp-tariff')?.value || '';
+      const status = q('#fp-status')?.value ?? '';
+      const mode = tariff ? 'tariff' : (status!=='' ? 'status' : null);
+      if (!mode) return;
+
+      const btn = q('#fp-apply'); const old = btn.textContent;
+      btn.disabled = true; btn.textContent = 'Применение...';
+
+      for (const id of ids){
+        try{
+          if (mode==='tariff'){ await postTariff(id, tariff); }
+          else { await postStatus(id, Number(status)); }
+        }catch{}
+      }
+
+      btn.textContent = 'Готово';
+      setTimeout(()=>{ btn.textContent = old; btn.disabled=false; }, 800);
+      updateApplyState();
+    }
+
+    /* ---------- ранний observer: без «скачков» ---------- */
+    const obs = new MutationObserver(muts=>{
+      for (const m of muts){
+        for (const n of m.addedNodes||[]){
+          if (!(n instanceof HTMLElement)) continue;
+          if (n.matches?.('.merchant-content-filters,.merchant-content-header,.merchant-content .merchant-content__header')) mountBarWhenReady();
+          if (n.matches?.('.merchant-computer') || n.querySelector?.('.merchant-computer')) attachCheckboxes(n);
+        }
+      }
+    });
+    obs.observe(document.documentElement, {childList:true, subtree:true});
+
+    mountBarWhenReady();
+    attachCheckboxes(document);
+  }catch(e){ try{console.warn('bulkOpsInit error', e);}catch{} }
 })();

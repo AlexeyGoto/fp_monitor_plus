@@ -437,7 +437,7 @@
       //      setTimeout(tryClick, 700);
       //    } catch (e) {/* cross-origin — просто игнор, сработает автоCollect ниже */}
       //  };
-      //  iframe.src = 'https://fogplay.mts.ru/merchant/computers/?openStats&autoCollect=1&from=pivot';
+      //  iframe.src = 'https://fogplay.mts.ru/merchant/computers/?&autoCollect=1&from=pivot';
 
         // через 60 сек точно разблокируем кнопку
       //  setTimeout(()=>{ btn.disabled=false; btn.textContent = old; }, 60000);

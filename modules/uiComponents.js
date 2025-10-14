@@ -173,24 +173,17 @@ ${Object.entries(stats)
 function addMenuItem() {
   const lastItem = document.querySelector(".merchant-aside-menu__item");
   if (!lastItem) return;
-  const url = chrome.runtime.getURL("icons/icon48.png");
   const urlcat = chrome.runtime.getURL("icons/image_cat.png");
-  // Уже существующий пункт "Статистика Plugin"
-  const s1 = document.createElement("li");
-  s1.classList.add("merchant-aside-menu__item");
-  s1.style.cssText = "border-top:2px solid;padding-top:12px;";
-  s1.innerHTML = `<a class="merchant-aside-menu__link" href="/merchant/computers/?openStats">
-    <img src="${url}" alt="Статистика plugin"><span>Статистика Plugin</span></a>`;
 
-  // НОВЫЙ пункт "Аналитика (Pivot)"
-  const s2 = document.createElement("li");
-  s2.classList.add("merchant-aside-menu__item");
-  s2.innerHTML = `<a class="merchant-aside-menu__link" href="/merchant/computers/?openPivot">
+  // Пункт "Аналитика (Pivot)"
+  const s = document.createElement("li");
+  s.classList.add("merchant-aside-menu__item");
+  s.style.cssText = "border-top:2px solid;padding-top:12px;";
+  s.innerHTML = `<a class="merchant-aside-menu__link" href="/merchant/computers/?openPivot">
     <img src="${urlcat}" alt="Аналитика Pivot"><span>Аналитика GoTo</span></a>`;
 
   const ul = lastItem.parentNode;
-  ul.appendChild(s1);
-  ul.appendChild(s2);
+  ul.appendChild(s);
 }
 
 

@@ -1,44 +1,58 @@
 {
-   "action": {
-      "default_icon": {
-         "128": "icons/icon128.png",
-         "16": "icons/icon16.png",
-         "48": "icons/icon48.png"
-      },
-      "default_popup": "popup.html"
-   },
-   "background": {
-      "service_worker": "background.js"
-   },
-   "content_scripts": [ {
-      "js": [
-         "modules/dataParser.js",
-         "modules/dataFilter.js",
-         "modules/exportUtils.js",
-         "modules/uiComponents.js",
-         "modules/chartRenderer.js",
-         "modules/eventHandlers.js",
-         "modules/pivotRenderer.js",
-         "modules/computerPage.js",
-         "content.js"
-      ],
-      "matches": [ "https://fogplay.mts.ru/merchant/*" ],
-      "run_at": "document_start"
-   } ],
-   "description": "Аналитика и Мониторинг статуса компьютеров MTS FogPlay",
-   "host_permissions": [ "https://fogplay.mts.ru/*", "https://api.fogstats.ru/*" ],
-   "icons": {
+  "action": {
+    "default_icon": {
       "128": "icons/icon128.png",
       "16": "icons/icon16.png",
       "48": "icons/icon48.png"
-   },
-   "manifest_version": 3,
-   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnOFr9BQ1q4wht80orI4mNdepWP4D9wmLrZAYiS37HXfDju+vYRlwyef3cn9fxpXNg8hKCkuzXA37z8jY6nMULAMIwmt5QCgpB2ftnFpZrmB6fNlzLaQZlIiVIzVMXV9SuKvF8tfauctDmKYZ3k4Fry5QWJdIvrxVQNq86/5qa6PCAl81gmYFfJIb6lpd42lNPJ+DUIDznEN6qsMzUoUfkGfP4B2Zl/3AjyobFtmdqyzNvzvJqsMKKteqac4o2aGyQbe+cGfyascRb061w45S5MdKZc/a0o21DdTc9gc33wb159rJzF6OcCujKpIsbWQU4tAPDjSKxfYMyQdNmDWidQIDAQAB",
-   "name": "FogPlay Monitor Plus (бета)",
-   "permissions": [ "storage", "unlimitedStorage", "notifications", "alarms" ],
-   "version": "0.0.14",
-   "web_accessible_resources": [ {
-      "matches": [ "https://fogplay.mts.ru/*" ],
-      "resources": [ "icons/*" ]
-   } ]
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "js": [
+        "modules/dataParser.js",
+        "modules/dataFilter.js",
+        "modules/exportUtils.js",
+        "modules/uiComponents.js",
+        "modules/pivotRenderer.js",
+        "modules/computerPage.js",
+        "content.js"
+      ],
+      "matches": [
+        "https://fogplay.mts.ru/merchant/*"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "description": "Аналитика и Мониторинг статуса компьютеров MTS FogPlay",
+  "host_permissions": [
+    "https://fogplay.mts.ru/*",
+    "https://api.fogstats.ru/*"
+  ],
+  "icons": {
+    "128": "icons/icon128.png",
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png"
+  },
+  "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnOFr9BQ1q4wht80orI4mNdepWP4D9wmLrZAYiS37HXfDju+vYRlwyef3cn9fxpXNg8hKCkuzXA37z8jY6nMULAMIwmt5QCgpB2ftnFpZrmB6fNlzLaQZlIiVIzVMXV9SuKvF8tfauctDmKYZ3k4Fry5QWJdIvrxVQNq86/5qa6PCAl81gmYFfJIb6lpd42lNPJ+DUIDznEN6qsMzUoUfkGfP4B2Zl/3AjyobFtmdqyzNvzvJqsMKKteqac4o2aGyQbe+cGfyascRb061w45S5MdKZc/a0o21DdTc9gc33wb159rJzF6OcCujKpIsbWQU4tAPDjSKxfYMyQdNmDWidQIDAQAB",
+  "name": "FogPlay Monitor Plus (бета)",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "alarms"
+  ],
+  "version": "0.0.14",
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "https://fogplay.mts.ru/*"
+      ],
+      "resources": [
+        "icons/*"
+      ]
+    }
+  ]
 }

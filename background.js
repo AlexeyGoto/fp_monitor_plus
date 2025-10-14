@@ -83,13 +83,8 @@ async function fetchComputers() {
             computers.forEach(computer => {
                 const prevComputer = prevComputers.find(pc => pc.name === computer.name);
                 if ( prevComputer && prevComputer.text !== computer.text ) {
-                    chrome.notifications.create({
-                        type: 'basic',
-                        iconUrl: 'icons/icon128.png',
-                        title: `Изменение состояния ${computer.name}`,
-                        message: computer.text
-                    });
-                }
+                    // notifications removed
+}
             });
         }
 
