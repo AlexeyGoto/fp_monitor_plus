@@ -88,6 +88,18 @@
   const isOpenSession = s => { const st=(s?.status||'').toLowerCase(); return !s?.endTime || s.endTime==='-' || (!st.includes('заверш')); };
   const overlapMinutes = (a1,a2,b1,b2)=> Math.max(0, minutes(Math.min(+a2,+b2) - Math.max(+a1,+b1)));
 
+// ВСЕ входящие даты из ЛК считаем в поясе Москвы (UTC+3)
+// Работает даже если window.fpTZ ещё не подгружен
+const parseMSK = (str) => {
+  if (!str) return NaN;
+  if (window.fpTZ?.parseMSKtoMs) return window.fpTZ.parseMSKtoMs(str);
+  const s = String(str).trim().replace(' ', 'T');
+  // если уже есть зона (Z или +hh:mm) — пусть парсится нативно
+  if (/[zZ]|[+-]\d{2}:\d{2}$/.test(s)) return Date.parse(s);
+  // иначе насильно добавляем +03:00
+  return Date.parse(s + '+03:00');
+};
+
   function makeRange(kind, fromISO=null, toISO=null){
     const now = new Date();
     if (kind==='today') return { from: startOfToday(), to: now };
@@ -198,7 +210,14 @@ function calcRating(reviews, range) {
     else {
       const strong=document.createElement('b'); strong.textContent=current.gameName||'—';
       const dur=document.createElement('span');
-      const ts=current.startTime?new Date(current.startTime.replace(' ','T')).getTime():null;
+      //const ts=current.startTime?new Date(current.startTime.replace(' ','T')).getTime():null;
+      let ts = null;
+      if (current.startTime) {
+        const iso = current.startTime.replace(' ', 'T');
+        // если зона уже есть (Z или ±hh:mm) — используем как есть; иначе добавляем Москву
+        ts = Date.parse(/[zZ]|[+\-]\d{2}:\d{2}$/.test(iso) ? iso : iso + '+03:00');
+      }
+
       const tick=()=>{ const m=ts?minutes(Date.now()-ts):0; dur.textContent=` • ${Math.floor(m/60)} ч ${m%60} мин`; };
       tick(); setInterval(tick,30_000);
       line.append('Игра: ', strong, dur);
