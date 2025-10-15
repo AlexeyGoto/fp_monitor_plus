@@ -88,17 +88,17 @@
   const isOpenSession = s => { const st=(s?.status||'').toLowerCase(); return !s?.endTime || s.endTime==='-' || (!st.includes('заверш')); };
   const overlapMinutes = (a1,a2,b1,b2)=> Math.max(0, minutes(Math.min(+a2,+b2) - Math.max(+a1,+b1)));
 
-// ВСЕ входящие даты из ЛК считаем в поясе Москвы (UTC+3)
-// Работает даже если window.fpTZ ещё не подгружен
-const parseMSK = (str) => {
-  if (!str) return NaN;
-  if (window.fpTZ?.parseMSKtoMs) return window.fpTZ.parseMSKtoMs(str);
-  const s = String(str).trim().replace(' ', 'T');
-  // если уже есть зона (Z или +hh:mm) — пусть парсится нативно
-  if (/[zZ]|[+-]\d{2}:\d{2}$/.test(s)) return Date.parse(s);
-  // иначе насильно добавляем +03:00
-  return Date.parse(s + '+03:00');
-};
+  // ВСЕ входящие даты из ЛК считаем в поясе Москвы (UTC+3)
+  // Работает даже если window.fpTZ ещё не подгружен
+  const parseMSK = (str) => {
+    if (!str) return NaN;
+    if (window.fpTZ?.parseMSKtoMs) return window.fpTZ.parseMSKtoMs(str);
+    const s = String(str).trim().replace(' ', 'T');
+    // если уже есть зона (Z или +hh:mm) — пусть парсится нативно
+    if (/[zZ]|[+-]\d{2}:\d{2}$/.test(s)) return Date.parse(s);
+    // иначе насильно добавляем +03:00
+    return Date.parse(s + '+03:00');
+  };
 
   function makeRange(kind, fromISO=null, toISO=null){
     const now = new Date();
