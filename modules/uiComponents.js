@@ -73,19 +73,7 @@ function createStatisticHTML(stats = null) {
     const container = document.createElement("div");
     container.className = "merchant-statistic-container";
 
-    if ( !stats ) {
-        container.innerHTML = `${baseStyle}<h1>Статистика работы компьютеров</h1>
-<div style="display:flex;gap:8px;margin-bottom:15px;">
-<button id="loadStatsButton" class="load-button">Загрузить статистику</button>
-<button id="clearCacheButton" class="load-button" style="background:#dc2626;">Обновить без кэша</button>
-<button id="stopParsingButton" class="load-button" style="background:#6b7280;display:none;">Остановить</button>
-</div>
-<div id="progressContainer" class="progress-container">
-<div class="progress-bar"><div id="progressBarFill" class="progress-bar-fill"></div></div>
-<div id="progressText" class="progress-text">Загрузка статистики...</div>
-</div>`;
-        return container;
-    }
+    if (!stats) { container.innerHTML = `${baseStyle}<h1>Статистика работы компьютеров</h1>`; return container; }
 
     const totalStats = window.DataFilter.calculateTotalStats(stats);
     const totalStatsHtml = `<div class="total-stats">
@@ -119,10 +107,7 @@ function createStatisticHTML(stats = null) {
     const url = chrome.runtime.getURL("icons/computer.png");
     container.innerHTML = `${baseStyle}<h1>Статистика работы компьютеров</h1>
 <div style="display:flex;gap:8px;margin-bottom:15px;">
-<button id="loadStatsButton" class="load-button">Обновить статистику</button>
-<button id="clearCacheButton" class="load-button" style="background:#dc2626;">Обновить без кэша</button>
 <button id="exportXLSButton"  class="load-button">Экспорт всех сессий в XLS</button>
-<button id="stopParsingButton" class="load-button" style="background:#6b7280;display:none;">Остановить</button>
 </div>
 ${totalStatsHtml}
 <div class="statistic-grid">
